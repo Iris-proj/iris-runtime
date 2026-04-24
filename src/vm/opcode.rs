@@ -257,6 +257,9 @@ pub enum OpCode {
     // == Miscellaneous ==
     PrintTopOfStack = 224,
     NoOperation = 225,
+    Add = 226,
+    Halt = 227,
+    Print = 228,
 }
 
 impl From<u8> for OpCode {
@@ -487,6 +490,9 @@ impl From<u8> for OpCode {
             223 => OpCode::MegamorphicMethodCall,
             224 => OpCode::PrintTopOfStack,
             225 => OpCode::NoOperation,
+            226 => OpCode::Add,
+            227 => OpCode::Halt,
+            228 => OpCode::Print,
             _ => OpCode::Unknown,
         }
     }
