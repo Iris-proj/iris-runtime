@@ -114,9 +114,8 @@ impl IrisEngine {
         self.frames.last().map_or(0, |frame| frame.stack_base)
     }
 
-    // ... rest of the impl IrisEngine block ...
 
-        pub fn push_frame(&mut self, function: Rc<Function>, arg_count: usize) -> Result<(), EngineError> {
+    pub fn push_frame(&mut self, function: Rc<Function>, arg_count: usize) -> Result<(), EngineError> {
         let frame = CallFrame {
             function,
             ip: 0,
@@ -212,7 +211,7 @@ impl IrisEngine {
         frame.function.constants().get(const_index).cloned().ok_or(EngineError::InvalidOperand(format!("Constant at index {} not found", const_index)))
     }
 
-    fn pop_stack(&mut self) -> Result<Value, EngineError> {
+    pub fn pop_stack(&mut self) -> Result<Value, EngineError> {
         self.stack.pop().ok_or(EngineError::StackUnderflow)
     }
 
@@ -2048,7 +2047,9 @@ impl IrisEngine {
                     crate::vm::function::FunctionKind::Native => {
                         // The native function now takes *mut IrisEngine and returns ().
                         // We need to pass the vm_ptr directly.
-                        (func.native.unwrap())(self as *mut IrisEngine);
+                        unsafe {
+                            (func.native.unwrap())(self as *mut IrisEngine);
+                        }
                     }
                     crate::vm::function::FunctionKind::Bytecode => {
                         self.stack.remove(callee_pos);
@@ -2072,7 +2073,9 @@ impl IrisEngine {
                         crate::vm::function::FunctionKind::Native => {
                             // The native function now takes *mut IrisEngine and returns ().
                             // We need to pass the vm_ptr directly.
-                            (method.native.unwrap())(self as *mut IrisEngine);
+                            unsafe {
+                                (method.native.unwrap())(self as *mut IrisEngine);
+                            }
                         }
                                                 crate::vm::function::FunctionKind::Bytecode => {
                             self.push_frame(method, arg_count)?;
@@ -2734,6 +2737,7 @@ impl IrisEngine {
                 OpCode::PrintTopOfStack => {
                     self.handle_print_top_of_stack()?;
                 },
+                OpCode::Add | OpCode::Halt | OpCode::Print => todo!(),
             }
         }
         Ok(())

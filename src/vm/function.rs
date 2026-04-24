@@ -14,9 +14,9 @@ pub struct Function {
     pub kind: FunctionKind,
     pub arity: usize,
     pub bytecode: Option<Vec<u8>>,
-    pub constants: Vec<Value>, // Added constants field
+    pub constants: Vec<Value>, 
     #[serde(skip)]
-    pub native: Option<fn(*mut IrisEngine)>,
+    pub native: Option<unsafe extern "C" fn(iris_engine: *mut IrisEngine)>
 }
 
 impl Function {
@@ -31,7 +31,7 @@ impl Function {
         }
     }
 
-    pub fn new_native(name: String, arity: usize, native: fn(*mut IrisEngine)) -> Self {
+    pub fn new_native(name: String, arity: usize, native: unsafe extern "C" fn(iris_engine: *mut IrisEngine)) -> Self {
         Self {
             name,
             kind: FunctionKind::Native,
@@ -42,11 +42,11 @@ impl Function {
         }
     }
 
-    pub fn constants(&self) -> &[Value] {
+    pub fn constants(&self) -> &Vec<Value> {
         &self.constants
     }
 
-    pub fn switch_native(&mut self, native: fn(*mut IrisEngine)){
+    pub fn switch_native(&mut self, native: unsafe extern "C" fn(iris_engine: *mut IrisEngine)){
         self.native = Some(native);
         self.kind = FunctionKind::Native;
     }

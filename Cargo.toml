@@ -1,5 +1,5 @@
 [package]
-name = "iris_vm"
+name = "iris"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,4 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive", "rc"] }
 bincode = { version = "2.0.1", features = ["std", "derive", "serde"] }
 zip = "7.2.0"
+inkwell = { version = "0.9.0", features = ["llvm22-1"] }

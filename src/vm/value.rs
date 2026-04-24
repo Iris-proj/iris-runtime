@@ -1,7 +1,7 @@
 use std::{rc::Rc, collections::HashMap, cell::RefCell};
+use serde::{Deserialize, Serialize};
 use crate::vm::object::{Instance, Class};
 use crate::vm::function::Function;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
@@ -26,8 +26,6 @@ pub enum Value {
     Str(Rc<String>),
     Object(Rc<Instance>),
     Function(Rc<Function>),
-    #[serde(skip)]
-    NativeFunction(fn(Vec<Value>) -> Value),
     Class(Rc<Class>),
     Array(Rc<RefCell<Vec<Value>>>),
     Map(Rc<RefCell<HashMap<Rc<String>, Value>>>),
@@ -54,11 +52,6 @@ impl PartialEq for Value {
             (Str(a), Str(b)) => a == b,
             (Object(a), Object(b)) => Rc::ptr_eq(a, b),
             (Function(a), Function(b)) => Rc::ptr_eq(a, b),
-            (NativeFunction(a), NativeFunction(b)) => {
-                let a_ptr: usize = *a as usize;
-                let b_ptr: usize = *b as usize;
-                a_ptr == b_ptr
-            }
             (Class(a), Class(b)) => Rc::ptr_eq(a, b),
             (Array(a), Array(b)) => Rc::ptr_eq(a, b),
             (Map(a), Map(b)) => Rc::ptr_eq(a, b),
