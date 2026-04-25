@@ -1,26 +1,31 @@
-# Iris VM: A High-Performance Virtual Machine
+# Iris Runtime: A High-Performance Execution Environment
 
-Iris VM is a lightweight, fast, and embeddable virtual machine. It's a core component of the Iris ecosystem, providing a runtime environment for executing Iris bytecode.
+Iris is a lightweight, fast, and embeddable runtime environment. What began as a standalone virtual machine has evolved into a comprehensive runtime for the Iris ecosystem, providing tools for building, managing, and executing Iris bytecode.
 
 ## About the Iris Project
 
-The Iris project aims to create a comprehensive framework for building compilers and virtual machines. It provides a set of tools and libraries that make it easy to create new programming languages that can run on the Iris VM. The project's goal is to create an ecosystem similar to .NET, where multiple languages can interoperate and run on the same virtual machine.
+The Iris project provides a modular framework for language development. By offering a unified **Runtime**, **VM**, and **Toolchain**, it enables an ecosystem similar to .NET or the JVM, where multiple languages can interoperate seamlessly on a shared infrastructure.
+
+## Key Components
+
+* **Iris VM:** The core execution engine optimized for high-performance bytecode interpretation.
+* **Iris Builder:** A dedicated toolchain for compiling and packaging Iris applications.
+* **Standard Library:** Built-in support for object-oriented primitives, including classes, instances, and methods.
 
 ## Features
 
-* **Lightweight and Embeddable:** Iris VM is designed to be easily integrated into other applications.
-* **Fast Execution:** The VM is optimized for speed and performance.
-* **Object-Oriented:** Iris VM has built-in support for classes, instances, and methods.
-* **Cross-Platform:** Iris VM can be compiled and run on various platforms.
+* **Integrated Runtime:** A complete environment that handles everything from bytecode loading to memory management.
+* **Rust-Powered Performance:** Built with Rust for memory safety and zero-cost abstractions, leveraging LLVM for efficient IR generation.
+* **Embeddable Design:** Designed to be integrated into larger applications as a scripting or execution engine.
+* **Cross-Platform:** Native support for various architectures and operating systems.
 
 ## Getting Started
 
-To start using Iris VM, you'll need to have the Rust programming language installed. You can then clone the repository and build the project:
+To build the Iris Runtime and its associated tools, ensure you have the Rust toolchain installed:
 
 ```bash
-git clone https://github.com/Iris-proj/iris-vm.git
-cd iris-vm
-cargo build --release
+git clone [https://github.com/Iris-proj/iris-vm.git](https://github.com/Iris-proj/iris-runtime.git)
+cargo build
 ```
 
 ## Contributing
