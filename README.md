@@ -1,4 +1,4 @@
-<img width="1500" height="500" alt="IrisRuntimeB" src="https://github.com/user-attachments/assets/a8dba5ea-0c17-4703-bebe-3113191aafe2" />
+<img width="750" height="250" alt="IrisRuntimeB" src="https://github.com/user-attachments/assets/a8dba5ea-0c17-4703-bebe-3113191aafe2" />
 
 # Iris Runtime: A High-Performance Execution Environment
 
