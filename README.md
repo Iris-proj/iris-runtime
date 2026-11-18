@@ -72,11 +72,11 @@ cargo build --release
 
 The compiled CLI binary will be available at `target/release/iris`.
 
----bash
+---
 
 ## Command Line Interface (CLI)
 
-```
+```bash
 Iris VM & Compiler CLI
 Usage: iris <command> [<args>]
 
