@@ -3,7 +3,7 @@
 **Iris** is a multi-tier runtime engine, ahead-of-time (AOT) compiler, and virtual machine written in Rust. Designed around a "write once, run anywhere" philosophy, Iris enables language designers and systems developers to target diverse execution backends—from bytecode interpreters to CPU JIT, native binary generation, and hardware GPU compute—using a unified intermediate representation (IR).
 
 <p align="center">
-  <img width="525" height="175" alt="IrisRuntimeB" src="https://github.com/user-attachments/assets/a8dba5ea-0c17-4703-bebe-3113191aafe2" />
+  <img width="525" height="175" alt="IrisRuntimeB" src="https://github.com/user-attachments/assets/7ddc6f0c-2655-4c4f-b003-2992ef3277f1" />
 </p>
 
 ---
