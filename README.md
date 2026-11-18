@@ -72,7 +72,7 @@ cargo build --release
 
 The compiled CLI binary will be available at `target/release/iris`.
 
----
+---bash
 
 ## Command Line Interface (CLI)
 
@@ -89,7 +89,7 @@ Commands:
 
 Execute an Iris program on any target using `iris run`:
 
-```bash
+```py
 # Run on the default Native JIT / AOT engine
 iris run app.paper --target native -O 3
 
@@ -110,7 +110,7 @@ iris run bytecode.ic
 
 Generate standalone executables, object files, or LLVM IR using `iris build`:
 
-```bash
+```py
 # Build standalone binary executable
 iris build app.paper -o my_app --emit exe -O 3
 
@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Project Structure
 
-```
+```py
 iris-vm/
 ├── Cargo.toml               # Package dependencies (inkwell, ash, serde, bincode, etc.)
 ├── src/
