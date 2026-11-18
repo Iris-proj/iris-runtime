@@ -1,0 +1,3175 @@
+use crate::vm::{object::{Instance, Class}, opcode::OpCode, value::Value, function::Function};
+use std::{rc::Rc, collections::HashMap, cell::RefCell, error::Error, fmt};
+
+#[derive(Debug)]
+pub enum EngineError {
+    StackUnderflow,
+    TypeMismatch(String),
+    UndefinedVariable(String),
+    UndefinedProperty(usize),
+    MethodNotFound(usize),
+    NonCallableValue,
+    NonObjectValue,
+    NonClassValue,
+    NonStringKey,
+    IndexOutOfBounds,
+    DivisionByZero,
+    UnknownOpCode,
+    InvalidOperand(String),
+    UnhandledException(Value),
+    NoActiveCallFrame,
+    NoTryFrame,
+}
+
+impl fmt::Display for EngineError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            EngineError::StackUnderflow => write!(f, "Stack underflow"),
+            EngineError::TypeMismatch(msg) => write!(f, "Type mismatch: {}", msg),
+            EngineError::UndefinedVariable(name) => write!(f, "Undefined variable: '{}'", name),
+            EngineError::UndefinedProperty(name) => write!(f, "Undefined property: '{}'", name),
+            EngineError::MethodNotFound(name) => write!(f, "Method '{}' not found", name),
+            EngineError::NonCallableValue => write!(f, "Attempted to call a non-callable value"),
+            EngineError::NonObjectValue => write!(f, "Attempted operation on a non-object value"),
+            EngineError::NonClassValue => write!(f, "Expected a Class value"),
+            EngineError::NonStringKey => write!(f, "Map keys must be strings"),
+            EngineError::IndexOutOfBounds => write!(f, "Array index out of bounds"),
+            EngineError::DivisionByZero => write!(f, "Division by zero"),
+            EngineError::UnknownOpCode => write!(f, "Unknown opcode encountered"),
+            EngineError::InvalidOperand(msg) => write!(f, "Invalid operand: {}", msg),
+            EngineError::UnhandledException(val) => write!(f, "Unhandled exception: {:?}", val),
+            EngineError::NoActiveCallFrame => write!(f, "No active call frame"),
+            EngineError::NoTryFrame => write!(f, "No try frame to end"),
+        }
+    }
+}
+
+impl Error for EngineError {}
+
+#[derive(Debug, Clone, Copy)]
+enum Numeric {
+    Int(i64),
+    Float(f64),
+}
+
+fn value_to_numeric(value: &Value) -> Option<Numeric> {
+    match value {
+        Value::I8(v) => Some(Numeric::Int(*v as i64)),
+        Value::I16(v) => Some(Numeric::Int(*v as i64)),
+        Value::I32(v) => Some(Numeric::Int(*v as i64)),
+        Value::I64(v) => Some(Numeric::Int(*v)),
+        Value::U8(v) => Some(Numeric::Int(*v as i64)),
+        Value::U16(v) => Some(Numeric::Int(*v as i64)),
+        Value::U32(v) => Some(Numeric::Int(*v as i64)),
+        Value::U64(v) => Some(Numeric::Int(*v as i64)),
+        Value::I128(v) => Some(Numeric::Int(*v as i64)),
+        Value::U128(v) => Some(Numeric::Int(*v as i64)),
+        Value::F32(v) => Some(Numeric::Float(*v as f64)),
+        Value::F64(v) => Some(Numeric::Float(*v)),
+        _ => None,
+    }
+}
+
+#[repr(C)]
+pub struct IrisEngine {
+    pub stack: Vec<Value>,
+    frames: Vec<CallFrame>,
+    globals: Vec<Value>,
+    try_frames: Vec<TryFrame>,
+    pub global_id: usize,
+    pub thread_idx: usize,
+    pub block_idx: usize,
+    pub papers: std::collections::HashMap<String, crate::builder::paper::Paper>,
+}
+
+struct CallFrame {
+    function: Rc<Function>,
+    ip: usize,
+    stack_base: usize,
+}
+
+impl CallFrame {
+        #[allow(dead_code)]
+    pub fn new(function: Rc<Function>, stack_base: usize) -> Self {
+        CallFrame {
+            function,
+            ip: 0,
+            stack_base,
+        }
+    }
+}
+
+struct TryFrame {
+    ip: usize,
+    stack_size: usize,
+}
+
+impl IrisEngine {
+    pub fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            frames: vec![], 
+            globals: Vec::new(),
+            try_frames: Vec::new(),
+            global_id: 0,
+            thread_idx: 0,
+            block_idx: 0,
+            papers: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn register_paper(&mut self, paper: crate::builder::paper::Paper) -> &mut Self {
+        self.papers.insert(paper.name.clone(), paper);
+        self
+    }
+
+    pub fn get_paper(&self, name: &str) -> Option<&crate::builder::paper::Paper> {
+        self.papers.get(name)
+    }
+
+    pub fn with_thread_context(mut self, global_id: usize, thread_idx: usize, block_idx: usize) -> Self {
+        self.global_id = global_id;
+        self.thread_idx = thread_idx;
+        self.block_idx = block_idx;
+        self
+    }
+
+    pub fn current_frame_stack_offset(&self) -> usize {
+        self.frames.last().map_or(0, |frame| frame.stack_base)
+    }
+
+
+    pub fn push_frame(&mut self, function: Rc<Function>, arg_count: usize) -> Result<(), EngineError> {
+        let frame = CallFrame {
+            function,
+            ip: 0,
+            stack_base: self.stack.len() - arg_count,
+        };
+        self.frames.push(frame);
+        Ok(())
+    }
+
+    fn current_frame_mut(&mut self) -> Result<&mut CallFrame, EngineError> {
+        self.frames.last_mut().ok_or(EngineError::NoActiveCallFrame)
+    }
+
+    fn current_frame(&self) -> Result<&CallFrame, EngineError> {
+        self.frames.last().ok_or(EngineError::NoActiveCallFrame)
+    }
+
+    fn read_byte(&mut self) -> Result<u8, EngineError> {
+        let frame = self.current_frame_mut()?;
+        let bytecode = frame.function.bytecode.as_ref().ok_or(EngineError::InvalidOperand("Bytecode not found".to_string()))?;
+        if frame.ip >= bytecode.len() {
+            return Err(EngineError::InvalidOperand("Instruction pointer out of bounds".to_string()));
+        }
+        let byte = bytecode[frame.ip];
+        frame.ip += 1;
+        Ok(byte)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, EngineError> {
+        let byte1 = self.read_byte()?;
+        let byte2 = self.read_byte()?;
+        Ok(u16::from_be_bytes([byte1, byte2]))
+    }
+
+    #[allow(dead_code)]
+    fn read_u32(&mut self) -> Result<u32, EngineError> {
+        let byte1 = self.read_byte()?;
+        let byte2 = self.read_byte()?;
+        let byte3 = self.read_byte()?;
+        let byte4 = self.read_byte()?;
+        Ok(((byte1 as u32) << 24) | ((byte2 as u32) << 16) | ((byte3 as u32) << 8) | (byte4 as u32))
+    }
+
+    fn read_i8(&mut self) -> Result<i8, EngineError> {
+        self.read_byte().map(|b| b as i8)
+    }
+
+    fn read_i16(&mut self) -> Result<i16, EngineError> {
+        let byte1 = self.read_byte()?;
+        let byte2 = self.read_byte()?;
+        Ok(i16::from_be_bytes([byte1, byte2]))
+    }
+
+    fn read_i32(&mut self) -> Result<i32, EngineError> {
+        let bytes = [
+            self.read_byte()?, self.read_byte()?, self.read_byte()?, self.read_byte()?,
+        ];
+        Ok(i32::from_be_bytes(bytes))
+    }
+
+    fn read_i64(&mut self) -> Result<i64, EngineError> {
+        let bytes = [
+            self.read_byte()?, self.read_byte()?, self.read_byte()?, self.read_byte()?,
+            self.read_byte()?, self.read_byte()?, self.read_byte()?, self.read_byte()?,
+        ];
+        Ok(i64::from_be_bytes(bytes))
+    }
+
+    fn read_f32(&mut self) -> Result<f32, EngineError> {
+        let bytes = [
+            self.read_byte()?, self.read_byte()?, self.read_byte()?, self.read_byte()?,
+        ];
+        Ok(f32::from_be_bytes(bytes))
+    }
+
+    fn read_f64(&mut self) -> Result<f64, EngineError> {
+        let bytes = [
+            self.read_byte()?, self.read_byte()?, self.read_byte()?, self.read_byte()?,
+            self.read_byte()?, self.read_byte()?, self.read_byte()?, self.read_byte()?,
+        ];
+        Ok(f64::from_be_bytes(bytes))
+    }
+
+    fn read_constant8(&mut self) -> Result<Value, EngineError> {
+        let const_index = self.read_byte()? as usize;
+        let frame = self.current_frame()?;
+        frame.function.constants().get(const_index).cloned().ok_or(EngineError::InvalidOperand(format!("Constant at index {} not found", const_index)))
+    }
+
+    fn read_constant16(&mut self) -> Result<Value, EngineError> {
+        let const_index = self.read_u16()? as usize;
+        let frame = self.current_frame()?;
+        frame.function.constants().get(const_index).cloned().ok_or(EngineError::InvalidOperand(format!("Constant at index {} not found", const_index)))
+    }
+
+    pub fn pop_stack(&mut self) -> Result<Value, EngineError> {
+        self.stack.pop().ok_or(EngineError::StackUnderflow)
+    }
+
+    fn peek_stack(&self, distance: usize) -> Result<&Value, EngineError> {
+        if self.stack.len() > distance {
+            Ok(&self.stack[self.stack.len() - 1 - distance])
+        } else {
+            Err(EngineError::StackUnderflow)
+        }
+    }
+
+    fn handle_rotate_top_three(&mut self) -> Result<(), EngineError> {
+        if self.stack.len() < 3 {
+            return Err(EngineError::StackUnderflow);
+        }
+        let c = self.pop_stack()?;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(c);
+        self.stack.push(a);
+        self.stack.push(b);
+        Ok(())
+    }
+
+    fn handle_peek_stack(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_byte()? as usize;
+        let value = self.peek_stack(offset)?.clone();
+        self.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_roll_stack_items(&mut self) -> Result<(), EngineError> {
+        let count = self.read_byte()? as usize;
+        if self.stack.len() < count {
+            return Err(EngineError::StackUnderflow);
+        }
+        let top = self.stack.len();
+        self.stack[top - count..top].rotate_right(1);
+        Ok(())
+    }
+
+    fn handle_drop_multiple(&mut self) -> Result<(), EngineError> {
+        let count = self.read_byte()? as usize;
+        if self.stack.len() < count {
+            return Err(EngineError::StackUnderflow);
+        }
+        self.stack.truncate(self.stack.len() - count);
+        Ok(())
+    }
+
+    fn handle_duplicate_multiple(&mut self) -> Result<(), EngineError> {
+        let count = self.read_byte()? as usize;
+        if self.stack.len() < count {
+            return Err(EngineError::StackUnderflow);
+        }
+        let top = self.stack.len();
+        for i in 0..count {
+            self.stack.push(self.stack[top - count + i].clone());
+        }
+        Ok(())
+    }
+
+    fn handle_swap_top_two_pairs(&mut self) -> Result<(), EngineError> {
+        if self.stack.len() < 4 {
+            return Err(EngineError::StackUnderflow);
+        }
+        let d = self.pop_stack()?;
+        let c = self.pop_stack()?;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(c);
+        self.stack.push(d);
+        self.stack.push(a);
+        self.stack.push(b);
+        Ok(())
+    }
+
+    fn handle_swap_multiple(&mut self) -> Result<(), EngineError> {
+        let count = self.read_byte()? as usize;
+        if self.stack.len() < count * 2 {
+            return Err(EngineError::StackUnderflow);
+        }
+        let top = self.stack.len();
+        for i in 0..count {
+            self.stack.swap(top - 1 - i, top - 1 - i - count);
+        }
+        Ok(())
+    }
+
+    fn handle_call_dynamic_method(&mut self) -> Result<(), EngineError> {
+        let arg_count = self.read_byte()? as usize;
+        let method_name = self.pop_stack()?;
+        let instance = self.peek_stack(arg_count)?.clone();
+
+        if let Value::Str(name) = method_name {
+            if let Value::Object(obj) = instance {
+                if let Some(method_index) = obj.class.properties.get(name.as_ref()) {
+                    self.handle_invoke_method(*method_index, arg_count)
+                } else {
+                    Err(EngineError::MethodNotFound(0)) 
+                }
+            } else {
+                Err(EngineError::NonObjectValue)
+            }
+        } else {
+            Err(EngineError::TypeMismatch("Method name must be a string".to_string()))
+        }
+    }
+
+    fn handle_initialize_class(&mut self) -> Result<(), EngineError> {
+        
+        Ok(())
+    }
+
+    fn handle_check_cast_object(&mut self) -> Result<(), EngineError> {
+        let class_val = self.pop_stack()?;
+        let instance_val = self.peek_stack(0)?;
+        if let (Value::Class(class), Value::Object(instance)) = (class_val, instance_val) {
+            if instance.class.type_id == class.type_id {
+                Ok(())
+            } else {
+                Err(EngineError::TypeMismatch("Invalid cast".to_string()))
+            }
+        } else {
+            Err(EngineError::TypeMismatch("Invalid types for cast".to_string()))
+        }
+    }
+
+    fn handle_instance_of_check(&mut self) -> Result<(), EngineError> {
+        let class_val = self.pop_stack()?;
+        let instance_val = self.pop_stack()?;
+        if let (Value::Class(class), Value::Object(instance)) = (class_val, instance_val) {
+            let mut current_class = Some(instance.class.clone());
+            let mut is_instance = false;
+            while let Some(c) = current_class {
+                if c.type_id == class.type_id {
+                    is_instance = true;
+                    break;
+                }
+                current_class = c.superclass.clone();
+            }
+            self.stack.push(Value::Bool(is_instance));
+        } else {
+            self.stack.push(Value::Bool(false));
+        }
+        Ok(())
+    }
+
+    fn handle_load_method_handle(&mut self) -> Result<(), EngineError> {
+        let method_index = self.read_u16()? as usize;
+        let instance = self.pop_stack()?;
+        if let Value::Object(obj) = instance {
+            if let Some(method) = obj.class.find_method(method_index) {
+                self.stack.push(Value::Function(method));
+                Ok(())
+            } else {
+                Err(EngineError::MethodNotFound(method_index))
+            }
+        } else {
+            Err(EngineError::NonObjectValue)
+        }
+    }
+
+    fn handle_bind_method_handle(&mut self) -> Result<(), EngineError> {
+        
+        
+        Ok(())
+    }
+
+    fn handle_get_virtual_table(&mut self) -> Result<(), EngineError> {
+        
+        
+        Err(EngineError::InvalidOperand("GetVirtualTable is not supported".to_string()))
+    }
+
+    fn handle_set_virtual_table(&mut self) -> Result<(), EngineError> {
+        
+        Err(EngineError::InvalidOperand("SetVirtualTable is not supported".to_string()))
+    }
+
+    fn handle_allocate_object(&mut self) -> Result<(), EngineError> {
+        
+        
+        Err(EngineError::InvalidOperand("AllocateObject is not supported, use CreateNewInstance".to_string()))
+    }
+
+    fn handle_free_object(&mut self) -> Result<(), EngineError> {
+        
+        let _ = self.pop_stack()?;
+        Ok(())
+    }
+
+    fn handle_short_jump(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_byte()? as i8;
+        let frame = self.current_frame_mut()?;
+        frame.ip = (frame.ip as isize + offset as isize) as usize;
+        Ok(())
+    }
+
+    fn handle_jump_if_true(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let condition = self.pop_stack()?;
+        if condition.is_truthy() {
+            let frame = self.current_frame_mut()?;
+            frame.ip += offset;
+        }
+        Ok(())
+    }
+
+    fn handle_jump_if_null(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let value = self.pop_stack()?;
+        if let Value::Null = value {
+            let frame = self.current_frame_mut()?;
+            frame.ip += offset;
+        }
+        Ok(())
+    }
+
+    fn handle_jump_if_non_null(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let value = self.pop_stack()?;
+        if !matches!(value, Value::Null) {
+            let frame = self.current_frame_mut()?;
+            frame.ip += offset;
+        }
+        Ok(())
+    }
+
+    fn handle_loop_start_marker(&mut self) -> Result<(), EngineError> {
+        
+        Ok(())
+    }
+
+    fn handle_loop_end_marker(&mut self) -> Result<(), EngineError> {
+        
+        Ok(())
+    }
+
+    fn handle_tail_call_function(&mut self) -> Result<(), EngineError> {
+        
+        self.handle_call_function()
+    }
+
+    fn handle_table_switch(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("TableSwitch is not implemented".to_string()))
+    }
+
+    fn handle_lookup_switch(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("LookupSwitch is not implemented".to_string()))
+    }
+
+    fn handle_range_switch(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("RangeSwitch is not implemented".to_string()))
+    }
+
+    fn handle_catch_exception(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("CatchException is not implemented".to_string()))
+    }
+
+    fn handle_finally_block(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("FinallyBlock is not implemented".to_string()))
+    }
+
+    fn handle_unwind_stack(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("UnwindStack is not implemented".to_string()))
+    }
+
+    fn handle_boolean_and_operation(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(Value::Bool(a.is_truthy() && b.is_truthy()));
+        Ok(())
+    }
+
+    fn handle_boolean_or_operation(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(Value::Bool(a.is_truthy() || b.is_truthy()));
+        Ok(())
+    }
+
+    fn handle_bitwise_and_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val & b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for bitwise AND".to_string()))
+        }
+    }
+
+    fn handle_bitwise_or_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val | b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for bitwise OR".to_string()))
+        }
+    }
+
+    fn handle_bitwise_xor_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val ^ b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for bitwise XOR".to_string()))
+        }
+    }
+
+    fn handle_bitwise_not_int64(&mut self) -> Result<(), EngineError> {
+        let a = self.pop_stack()?;
+        if let Value::I64(a_val) = a {
+            self.stack.push(Value::I64(!a_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for bitwise NOT".to_string()))
+        }
+    }
+
+    fn handle_left_shift_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val << b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for left shift".to_string()))
+        }
+    }
+
+    fn handle_right_shift_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val >> b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for right shift".to_string()))
+        }
+    }
+
+    fn handle_unsigned_right_shift_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            self.stack.push(Value::I32((a_val as u32 >> b_val as u32) as i32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for unsigned right shift".to_string()))
+        }
+    }
+
+    fn handle_unsigned_right_shift_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64((a_val as u64 >> b_val as u64) as i64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for unsigned right shift".to_string()))
+        }
+    }
+
+    fn handle_rotate_left_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            self.stack.push(Value::I32(a_val.rotate_left(b_val as u32)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for rotate left".to_string()))
+        }
+    }
+
+    fn handle_rotate_right_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            self.stack.push(Value::I32(a_val.rotate_right(b_val as u32)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for rotate right".to_string()))
+        }
+    }
+
+    fn handle_add_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val.wrapping_add(b_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for addition".to_string()))
+        }
+    }
+
+    fn handle_add_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::F32(a_val + b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for addition".to_string()))
+        }
+    }
+
+    fn handle_add_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::F64(a_val + b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for addition".to_string()))
+        }
+    }
+
+    fn handle_subtract_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val.wrapping_sub(b_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for subtraction".to_string()))
+        }
+    }
+
+    fn handle_subtract_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::F32(a_val - b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for subtraction".to_string()))
+        }
+    }
+
+    fn handle_subtract_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::F64(a_val - b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for subtraction".to_string()))
+        }
+    }
+
+    fn handle_multiply_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::I64(a_val.wrapping_mul(b_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for multiplication".to_string()))
+        }
+    }
+
+    fn handle_multiply_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::F32(a_val * b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for multiplication".to_string()))
+        }
+    }
+
+    fn handle_multiply_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::F64(a_val * b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for multiplication".to_string()))
+        }
+    }
+
+    fn handle_divide_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            if b_val == 0 {
+                return Err(EngineError::DivisionByZero);
+            }
+            self.stack.push(Value::I64(a_val / b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for division".to_string()))
+        }
+    }
+
+    fn handle_divide_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::F32(a_val / b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for division".to_string()))
+        }
+    }
+
+    fn handle_divide_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::F64(a_val / b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for division".to_string()))
+        }
+    }
+
+    fn handle_modulo_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            if b_val == 0 {
+                return Err(EngineError::DivisionByZero);
+            }
+            self.stack.push(Value::I64(a_val % b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for modulo".to_string()))
+        }
+    }
+
+    fn handle_negate_int64(&mut self) -> Result<(), EngineError> {
+        let a = self.pop_stack()?;
+        if let Value::I64(a_val) = a {
+            self.stack.push(Value::I64(-a_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for negation".to_string()))
+        }
+    }
+
+    fn handle_negate_float32(&mut self) -> Result<(), EngineError> {
+        let a = self.pop_stack()?;
+        if let Value::F32(a_val) = a {
+            self.stack.push(Value::F32(-a_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for negation".to_string()))
+        }
+    }
+
+    fn handle_negate_float64(&mut self) -> Result<(), EngineError> {
+        let a = self.pop_stack()?;
+        if let Value::F64(a_val) = a {
+            self.stack.push(Value::F64(-a_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F64 value for negation".to_string()))
+        }
+    }
+
+    fn handle_increment_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::I32(i.wrapping_add(1)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for increment".to_string()))
+        }
+    }
+
+    fn handle_decrement_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::I32(i.wrapping_sub(1)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for decrement".to_string()))
+        }
+    }
+
+    fn handle_increment_int64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::I64(i.wrapping_add(1)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for increment".to_string()))
+        }
+    }
+
+    fn handle_decrement_int64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::I64(i.wrapping_sub(1)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for decrement".to_string()))
+        }
+    }
+
+    fn handle_add_int32_with_constant(&mut self) -> Result<(), EngineError> {
+        let constant = self.read_i32()?;
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::I32(i.wrapping_add(constant)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for add with constant".to_string()))
+        }
+    }
+
+    fn handle_add_int64_with_constant(&mut self) -> Result<(), EngineError> {
+        let constant = self.read_i64()?;
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::I64(i.wrapping_add(constant)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for add with constant".to_string()))
+        }
+    }
+
+    fn handle_multiply_int32_with_constant(&mut self) -> Result<(), EngineError> {
+        let constant = self.read_i32()?;
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::I32(i.wrapping_mul(constant)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for multiply with constant".to_string()))
+        }
+    }
+
+    fn handle_multiply_int64_with_constant(&mut self) -> Result<(), EngineError> {
+        let constant = self.read_i64()?;
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::I64(i.wrapping_mul(constant)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for multiply with constant".to_string()))
+        }
+    }
+
+    fn handle_fused_multiply_add_float32(&mut self) -> Result<(), EngineError> {
+        let c = self.pop_stack()?;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val), Value::F32(c_val)) = (a, b, c) {
+            self.stack.push(Value::F32(a_val.mul_add(b_val, c_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected three F32 values for fused multiply-add".to_string()))
+        }
+    }
+
+    fn handle_fused_multiply_add_float64(&mut self) -> Result<(), EngineError> {
+        let c = self.pop_stack()?;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val), Value::F64(c_val)) = (a, b, c) {
+            self.stack.push(Value::F64(a_val.mul_add(b_val, c_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected three F64 values for fused multiply-add".to_string()))
+        }
+    }
+
+    fn handle_absolute_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::I32(i.abs()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for absolute".to_string()))
+        }
+    }
+
+    fn handle_absolute_int64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::I64(i.abs()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for absolute".to_string()))
+        }
+    }
+
+    fn handle_absolute_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F32(f.abs()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for absolute".to_string()))
+        }
+    }
+
+    fn handle_absolute_float64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F64(f) = val {
+            self.stack.push(Value::F64(f.abs()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F64 value for absolute".to_string()))
+        }
+    }
+
+    fn handle_floor_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F32(f.floor()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for floor".to_string()))
+        }
+    }
+
+    fn handle_ceil_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F32(f.ceil()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for ceil".to_string()))
+        }
+    }
+
+    fn handle_round_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F32(f.round()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for round".to_string()))
+        }
+    }
+
+    fn handle_truncate_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F32(f.trunc()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for truncate".to_string()))
+        }
+    }
+
+    fn handle_square_root_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F32(f.sqrt()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for square root".to_string()))
+        }
+    }
+
+    fn handle_square_root_float64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F64(f) = val {
+            self.stack.push(Value::F64(f.sqrt()));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F64 value for square root".to_string()))
+        }
+    }
+
+    fn handle_equal_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val == b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for equality comparison".to_string()))
+        }
+    }
+
+    fn handle_equal_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val == b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for equality comparison".to_string()))
+        }
+    }
+
+    fn handle_equal_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val == b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for equality comparison".to_string()))
+        }
+    }
+
+    fn handle_not_equal_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val != b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for inequality comparison".to_string()))
+        }
+    }
+
+    fn handle_not_equal_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val != b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for inequality comparison".to_string()))
+        }
+    }
+
+    fn handle_not_equal_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val != b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for inequality comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_than_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_than_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_than_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_than_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_than_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_than_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_int64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I64(a_val), Value::I64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I64 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_float32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F32(a_val), Value::F32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F32 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_float64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::F64(a_val), Value::F64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two F64 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_compare_and_branch_equal_int32(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            if a_val == b_val {
+                self.current_frame_mut()?.ip += offset;
+            }
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for compare and branch".to_string()))
+        }
+    }
+
+    fn handle_compare_and_branch_not_equal_int32(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            if a_val != b_val {
+                self.current_frame_mut()?.ip += offset;
+            }
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for compare and branch".to_string()))
+        }
+    }
+
+    fn handle_compare_and_branch_less_than_int32(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            if a_val < b_val {
+                self.current_frame_mut()?.ip += offset;
+            }
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for compare and branch".to_string()))
+        }
+    }
+
+    fn handle_compare_and_branch_greater_than_int32(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            if a_val > b_val {
+                self.current_frame_mut()?.ip += offset;
+            }
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for compare and branch".to_string()))
+        }
+    }
+
+    fn handle_greater_unsigned8(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U8(a_val), Value::U8(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U8 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_unsigned16(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U16(a_val), Value::U16(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U16 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_unsigned32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U32(a_val), Value::U32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U32 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_unsigned64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U64(a_val), Value::U64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val > b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U64 values for greater than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_unsigned8(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U8(a_val), Value::U8(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U8 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_unsigned16(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U16(a_val), Value::U16(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U16 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_unsigned32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U32(a_val), Value::U32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U32 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_less_unsigned64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U64(a_val), Value::U64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val < b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U64 values for less than comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_unsigned8(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U8(a_val), Value::U8(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U8 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_unsigned16(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U16(a_val), Value::U16(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U16 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_unsigned32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U32(a_val), Value::U32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U32 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_greater_or_equal_unsigned64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U64(a_val), Value::U64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val >= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U64 values for greater or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_unsigned8(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U8(a_val), Value::U8(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U8 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_unsigned16(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U16(a_val), Value::U16(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U16 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_unsigned32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U32(a_val), Value::U32(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U32 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_less_or_equal_unsigned64(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::U64(a_val), Value::U64(b_val)) = (a, b) {
+            self.stack.push(Value::Bool(a_val <= b_val));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two U64 values for less or equal comparison".to_string()))
+        }
+    }
+
+    fn handle_convert_int32_to_int64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::I64(i as i64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_int32_to_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::F32(i as f32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_int32_to_float64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I32(i) = val {
+            self.stack.push(Value::F64(i as f64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I32 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_int64_to_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::I32(i as i32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_int64_to_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::F32(i as f32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_int64_to_float64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::I64(i) = val {
+            self.stack.push(Value::F64(i as f64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an I64 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_float32_to_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::I32(f as i32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_float32_to_int64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::I64(f as i64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_float32_to_float64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F32(f) = val {
+            self.stack.push(Value::F64(f as f64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F32 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_float64_to_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F64(f) = val {
+            self.stack.push(Value::I32(f as i32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F64 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_float64_to_int64(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F64(f) = val {
+            self.stack.push(Value::I64(f as i64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F64 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_convert_float64_to_float32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        if let Value::F64(f) = val {
+            self.stack.push(Value::F32(f as f32));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a F64 value for conversion".to_string()))
+        }
+    }
+
+    fn handle_get_array_length(&mut self) -> Result<(), EngineError> {
+        let array_val = self.pop_stack()?;
+        if let Value::Array(arr) = array_val {
+            self.stack.push(Value::I64(arr.borrow().len() as i64));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an array to get length".to_string()))
+        }
+    }
+
+    fn handle_resize_array(&mut self) -> Result<(), EngineError> {
+        let size_val = self.pop_stack()?;
+        let array_val = self.pop_stack()?;
+        if let (Value::Array(arr), Value::I64(size)) = (array_val, size_val) {
+            arr.borrow_mut().resize(size as usize, Value::Null);
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected an array and an integer size for resize".to_string()))
+        }
+    }
+
+    fn handle_get_array_index_float32(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("GetArrayIndexFloat32 is not supported".to_string()))
+    }
+
+    fn handle_set_array_index_float32(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("SetArrayIndexFloat32 is not supported".to_string()))
+    }
+
+    fn handle_get_array_index_fast_int32(&mut self) -> Result<(), EngineError> {
+        self.handle_get_array_index()
+    }
+
+    fn handle_set_array_index_fast_int32(&mut self) -> Result<(), EngineError> {
+        self.handle_set_array_index()
+    }
+
+    fn handle_map_contains_key(&mut self) -> Result<(), EngineError> {
+        let key_val = self.pop_stack()?;
+        let map_val = self.pop_stack()?;
+        if let (Value::Map(map), Value::Str(key)) = (map_val, key_val) {
+            self.stack.push(Value::Bool(map.borrow().contains_key(&key)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a map and a string key for contains key".to_string()))
+        }
+    }
+
+    fn handle_map_remove_key(&mut self) -> Result<(), EngineError> {
+        let key_val = self.pop_stack()?;
+        let map_val = self.pop_stack()?;
+        if let (Value::Map(map), Value::Str(key)) = (map_val, key_val) {
+            let removed_val = map.borrow_mut().remove(&key).unwrap_or(Value::Null);
+            self.stack.push(removed_val);
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a map and a string key for remove key".to_string()))
+        }
+    }
+
+    fn handle_map_get_or_default_value(&mut self) -> Result<(), EngineError> {
+        let default_val = self.pop_stack()?;
+        let key_val = self.pop_stack()?;
+        let map_val = self.pop_stack()?;
+        if let (Value::Map(map), Value::Str(key)) = (map_val, key_val) {
+            let value = map.borrow().get(&key).cloned().unwrap_or(default_val);
+            self.stack.push(value);
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected a map, a string key and a default value for get or default".to_string()))
+        }
+    }
+
+    fn handle_spawn_detached(&mut self) -> Result<(), EngineError> {
+        let const_idx = self.read_u16()? as usize;
+        let name_val = self.current_frame()?.function.constants.get(const_idx).cloned();
+        if let Some(Value::Str(name)) = name_val {
+            let paper_opt = crate::vm::pool::get_global_paper(&name)
+                .or_else(|| self.papers.get(name.as_str()).cloned());
+            if let Some(paper) = paper_opt {
+                crate::vm::pool::IrisThreadPool::global().spawn(move || {
+                    let mut vm = IrisEngine::new();
+                    let _ = paper.run_vm(&mut vm);
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_atomic_add_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            self.stack.push(Value::I32(a_val.wrapping_add(b_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for atomic add".to_string()))
+        }
+    }
+
+    fn handle_atomic_subtract_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        if let (Value::I32(a_val), Value::I32(b_val)) = (a, b) {
+            self.stack.push(Value::I32(a_val.wrapping_sub(b_val)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected two I32 values for atomic subtract".to_string()))
+        }
+    }
+
+    fn handle_atomic_compare_and_swap_int32(&mut self) -> Result<(), EngineError> {
+        let expected = self.pop_stack()?;
+        let new_val = self.pop_stack()?;
+        let val = self.pop_stack()?;
+        if let (Value::I32(val), Value::I32(expected), Value::I32(new_val)) = (val, expected, new_val) {
+            if val == expected {
+                self.stack.push(Value::I32(new_val));
+            } else {
+                self.stack.push(Value::I32(val));
+            }
+            self.stack.push(Value::Bool(val == expected));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected three I32 values for atomic compare and swap".to_string()))
+        }
+    }
+
+    fn handle_enter_monitor(&mut self) -> Result<(), EngineError> {
+        
+        Ok(())
+    }
+
+    fn handle_exit_monitor(&mut self) -> Result<(), EngineError> {
+        
+        Ok(())
+    }
+
+    fn handle_yield_current_thread(&mut self) -> Result<(), EngineError> {
+        
+        std::thread::yield_now();
+        Ok(())
+    }
+
+    fn handle_call_with_inline_cache(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("CallWithInlineCache is not implemented".to_string()))
+    }
+
+    fn handle_call_with_inline_cache_inline(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("CallWithInlineCacheInline is not implemented".to_string()))
+    }
+
+    fn handle_get_property_with_inline_cache(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("GetPropertyWithInlineCache is not implemented".to_string()))
+    }
+
+    fn handle_get_property_with_inline_cache_inline(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("GetPropertyWithInlineCacheInline is not implemented".to_string()))
+    }
+
+    fn handle_set_property_with_inline_cache(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("SetPropertyWithInlineCache is not implemented".to_string()))
+    }
+
+    fn handle_load_method_inline_cache(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("LoadMethodInlineCache is not implemented".to_string()))
+    }
+
+    fn handle_megamorphic_method_call(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::InvalidOperand("MegamorphicMethodCall is not implemented".to_string()))
+    }
+
+        #[allow(dead_code)]
+    fn handle_add_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+
+        
+        if let (Value::Str(s1), Value::Str(s2)) = (&a, &b) {
+            let mut new_s = s1.to_string();
+            new_s.push_str(s2);
+            self.stack.push(Value::Str(Rc::new(new_s)));
+            return Ok(());
+        }
+
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for addition.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for addition.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::I32((val_a as i32).wrapping_add(val_b as i32)),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::F64(val_a + val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::F64(val_a + val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::F64(val_a as f64 + val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_subtract_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for subtraction.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for subtraction.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::I32((val_a as i32).wrapping_sub(val_b as i32)),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::F64(val_a - val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::F64(val_a - val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::F64(val_a as f64 - val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_multiply_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for multiplication.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for multiplication.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::I32((val_a as i32).wrapping_mul(val_b as i32)),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::F64(val_a * val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::F64(val_a * val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::F64(val_a as f64 * val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_divide_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for division.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for division.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => {
+                if val_b == 0 {
+                    return Err(EngineError::DivisionByZero);
+                }
+                Value::I32((val_a as i32) / (val_b as i32))
+            }
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::F64(val_a / val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::F64(val_a / val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::F64(val_a as f64 / val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_modulo_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for modulo.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for modulo.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => {
+                if val_b == 0 {
+                    return Err(EngineError::DivisionByZero);
+                }
+                Value::I64(val_a % val_b)
+            }
+            (Numeric::Float(_), Numeric::Float(_)) => return Err(EngineError::TypeMismatch("Modulo cannot be applied to floats.".to_string())),
+            _ => return Err(EngineError::TypeMismatch("Modulo requires integer operands.".to_string())),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_negate_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        let result = match val {
+            Value::I8(x) => Value::I8(-x),
+            Value::I16(x) => Value::I16(-x),
+            Value::I32(x) => Value::I32(-x),
+            Value::I64(x) => Value::I64(-x),
+            Value::I128(x) => Value::I128(-x),
+            Value::F32(x) => Value::F32(-x),
+            Value::F64(x) => Value::F64(-x),
+            _ => return Err(EngineError::TypeMismatch("Negate operation on non-numeric type".to_string())),
+        };
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_equal_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(Value::Bool(a == b));
+        Ok(())
+    }
+
+    fn handle_not_equal_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(Value::Bool(a != b));
+        Ok(())
+    }
+
+    fn handle_greater_than_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for comparison.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for comparison.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::Bool(val_a > val_b),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::Bool(val_a > val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::Bool(val_a > val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::Bool((val_a as f64) > val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+        #[allow(dead_code)]
+    fn handle_less_than_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for comparison.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for comparison.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::Bool(val_a < val_b),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::Bool(val_a < val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::Bool(val_a < val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::Bool((val_a as f64) < val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_greater_or_equal_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for comparison.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for comparison.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::Bool(val_a >= val_b),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::Bool(val_a >= val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::Bool(val_a >= val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::Bool(val_a as f64 >= val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_less_or_equal_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let num_a = value_to_numeric(&a)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'a' must be numeric for comparison.".to_string()))?;
+        let num_b = value_to_numeric(&b)
+            .ok_or_else(|| EngineError::TypeMismatch("Operand 'b' must be numeric for comparison.".to_string()))?;
+
+        let result = match (num_a, num_b) {
+            (Numeric::Int(val_a), Numeric::Int(val_b)) => Value::Bool(val_a <= val_b),
+            (Numeric::Float(val_a), Numeric::Float(val_b)) => Value::Bool(val_a <= val_b),
+            (Numeric::Float(val_a), Numeric::Int(val_b)) => Value::Bool(val_a <= val_b as f64),
+            (Numeric::Int(val_a), Numeric::Float(val_b)) => Value::Bool(val_a as f64 <= val_b),
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_logical_and_operation(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(Value::Bool(a.is_truthy() && b.is_truthy()));
+        Ok(())
+    }
+
+    fn handle_logical_or_operation(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        self.stack.push(Value::Bool(a.is_truthy() || b.is_truthy()));
+        Ok(())
+    }
+
+    fn handle_logical_not_operation(&mut self) -> Result<(), EngineError> {
+        let value = self.pop_stack()?;
+        self.stack.push(Value::Bool(!value.is_truthy()));
+        Ok(())
+    }
+
+    fn handle_bitwise_and_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let result = match (a, b) {
+            (Value::I64(x), Value::I64(y)) => Ok(Value::I64(x & y)),
+            _ => return Err(EngineError::TypeMismatch("BitwiseAnd operation on non-I64 types".to_string())),
+        }?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_bitwise_or_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let result = match (a, b) {
+            (Value::I64(x), Value::I64(y)) => Ok(Value::I64(x | y)),
+            _ => return Err(EngineError::TypeMismatch("BitwiseOr operation on non-I64 types".to_string())),
+        }?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_bitwise_xor_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let result = match (a, b) {
+            (Value::I64(x), Value::I64(y)) => Ok(Value::I64(x ^ y)),
+            _ => return Err(EngineError::TypeMismatch("BitwiseXor operation on non-I64 types".to_string())),
+        }?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_bitwise_not_int32(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        let result = match val {
+            Value::I64(x) => Value::I64(!x),
+            _ => return Err(EngineError::TypeMismatch("BitwiseNot operation on non-I64 type".to_string())),
+        };
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_left_shift_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let result = match (a, b) {
+            (Value::I64(x), Value::I64(y)) => Ok(Value::I64(x << y)),
+            _ => return Err(EngineError::TypeMismatch("LeftShift operation on non-I64 types".to_string())),
+        }?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_right_shift_int32(&mut self) -> Result<(), EngineError> {
+        let b = self.pop_stack()?;
+        let a = self.pop_stack()?;
+        let result = match (a, b) {
+            (Value::I64(x), Value::I64(y)) => Ok(Value::I64(x >> y)),
+            _ => return Err(EngineError::TypeMismatch("RightShift operation on non-I64 types".to_string())),
+        }?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_print_top_of_stack(&mut self) -> Result<(), EngineError> {
+        let val = self.pop_stack()?;
+        match val {
+            Value::Str(ref s) => println!("{}", s),
+            Value::I32(v) => println!("{}", v),
+            Value::I64(v) => println!("{}", v),
+            _ => println!("{:?}", val),
+        }
+        Ok(())
+    }
+
+    fn handle_unconditional_jump(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let frame = self.current_frame_mut()?;
+        frame.ip += offset;
+        Ok(())
+    }
+
+    fn handle_jump_if_false(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let condition = self.pop_stack()?;
+        let frame = self.current_frame_mut()?;
+        if !condition.is_truthy() {
+            frame.ip += offset;
+        }
+        Ok(())
+    }
+
+    fn handle_loop_jump(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let frame = self.current_frame_mut()?;
+        frame.ip -= offset;
+        Ok(())
+    }
+
+        fn handle_call_function(&mut self) -> Result<(), EngineError> {
+        let arg_count = self.read_byte()? as usize;
+        let callee_pos = self.stack.len() - 1 - arg_count;
+        let callee = self.stack[callee_pos].clone();
+
+        match callee {
+            Value::Function(func) => {
+                match func.kind {
+                    crate::vm::function::FunctionKind::Paper => {
+
+                    }
+                    crate::vm::function::FunctionKind::Native => {
+                        unsafe {
+                            func.native.unwrap()(self as *mut IrisEngine);
+                        }
+                    }
+                    crate::vm::function::FunctionKind::Bytecode => {
+                        self.stack.remove(callee_pos);
+                        self.push_frame(func, arg_count)?;
+                    }
+                }
+            }
+            _ => return Err(EngineError::NonCallableValue),
+        }
+        Ok(())
+    }
+
+    fn handle_invoke_method(&mut self, method_index: usize, arg_count: usize) -> Result<(), EngineError> {
+        let _instance_index = self.stack.len() - 1 - arg_count;
+        let instance_value = self.peek_stack(arg_count)?.clone();
+
+        match instance_value {
+            Value::Object(instance_rc) => {
+                if let Some(method) = instance_rc.get_method(method_index) {
+                    match method.kind {
+                        crate::vm::function::FunctionKind::Paper => {
+
+                        }
+                        crate::vm::function::FunctionKind::Native => {
+                            unsafe {
+                                method.native.unwrap()(self as *mut IrisEngine);
+                            }
+                        }
+                        crate::vm::function::FunctionKind::Bytecode => {
+                            self.push_frame(method, arg_count)?;
+                        }
+                    }
+                } else {
+                    return Err(EngineError::MethodNotFound(method_index));
+                }
+            }
+            _ => return Err(EngineError::NonObjectValue),
+        }
+        Ok(())
+    }
+
+    fn handle_get_local_variable(&mut self, slot: usize) -> Result<(), EngineError> {
+        let stack_base = self.current_frame()?.stack_base;
+        let idx = stack_base + slot;
+        if idx >= self.stack.len() {
+            self.stack.resize(idx + 1, Value::Null);
+        }
+        let value = self.stack[idx].clone();
+        self.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_set_local_variable(&mut self, slot: usize) -> Result<(), EngineError> {
+        let value = self.peek_stack(0)?.clone();
+        let stack_base = self.current_frame()?.stack_base;
+        let idx = stack_base + slot;
+        if idx >= self.stack.len() {
+            self.stack.resize(idx + 1, Value::Null);
+        }
+        self.stack[idx] = value;
+        Ok(())
+    }
+
+    fn handle_get_global_variable(&mut self, slot: usize) -> Result<(), EngineError> {
+        if slot >= self.globals.len() {
+            return Err(EngineError::UndefinedVariable(format!("Global variable at slot {} not found", slot)));
+        }
+        let value = self.globals[slot].clone();
+        self.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_define_global_variable(&mut self, slot: usize) -> Result<(), EngineError> {
+        let value = self.pop_stack()?;
+        if slot >= self.globals.len() {
+            self.globals.resize(slot + 1, Value::Null);
+        }
+        self.globals[slot] = value;
+        Ok(())
+    }
+
+    fn handle_set_global_variable(&mut self, slot: usize) -> Result<(), EngineError> {
+        let value = self.peek_stack(0)?.clone();
+        if slot >= self.globals.len() {
+            return Err(EngineError::UndefinedVariable(format!("Global variable at slot {} not found for setting", slot)));
+        }
+        self.globals[slot] = value;
+        Ok(())
+    }
+
+    fn handle_get_object_property(&mut self, index: usize) -> Result<(), EngineError> {
+        let instance = self.pop_stack()?;
+        match instance {
+            Value::Object(obj) => {
+                if let Some(value) = obj.get_field(index) {
+                    self.stack.push(value.clone());
+                } else {
+                    return Err(EngineError::UndefinedProperty(index));
+                }
+            }
+            _ => return Err(EngineError::NonObjectValue),
+        }
+        Ok(())
+    }
+
+    fn handle_set_object_property(&mut self, index: usize) -> Result<(), EngineError> {
+        let value = self.pop_stack()?;
+        let instance_val = self.pop_stack()?;
+        match instance_val {
+            Value::Object(mut obj) => {
+                Rc::get_mut(&mut obj).ok_or(EngineError::InvalidOperand("Could not get mutable reference to object".to_string()))?.set_field(index, value);
+            }
+            _ => return Err(EngineError::NonObjectValue),
+        }
+        Ok(())
+    }
+
+    fn handle_create_new_instance(&mut self) -> Result<(), EngineError> {
+        let class_val = self.pop_stack()?;
+        match class_val {
+            Value::Class(class_rc) => {
+                let instance = Instance::new(class_rc.clone());
+                self.stack.push(Value::Object(Rc::new(instance)));
+            }
+            _ => return Err(EngineError::NonClassValue),
+        }
+        Ok(())
+    }
+
+    fn handle_get_super_class_method(&mut self, index: usize) -> Result<(), EngineError> {
+        let superclass_val = self.pop_stack()?;
+        let instance_val = self.pop_stack()?;
+
+        match (superclass_val, instance_val) {
+            (Value::Class(superclass_rc), Value::Object(_instance_rc)) => {
+                if let Some(method) = superclass_rc.find_method(index) {
+                    self.stack.push(Value::Function(method));
+                } else {
+                    return Err(EngineError::MethodNotFound(index));
+                }
+            }
+            _ => return Err(EngineError::TypeMismatch("GetSuper expects a Class and an Object on the stack.".to_string())),
+        }
+        Ok(())
+    }
+
+    fn handle_define_class(&mut self, name_index: usize) -> Result<(), EngineError> {
+        let name = match self.current_frame()?.function.constants().get(name_index).ok_or(EngineError::InvalidOperand("Class name constant not found".to_string()))? {
+            Value::Str(s) => s.clone(),
+            _ => return Err(EngineError::TypeMismatch("Class name is not a string".to_string())),
+        };
+        let class = Rc::new(Class::new(name.clone().to_string(), 0, None));
+        self.stack.push(Value::Class(class));
+        Ok(())
+    }
+
+    fn handle_create_new_array(&mut self, num_elements: usize) -> Result<(), EngineError> {
+        if self.stack.len() < num_elements {
+            return Err(EngineError::StackUnderflow);
+        }
+        let elements: Vec<Value> = self.stack.drain(self.stack.len() - num_elements..).collect();
+        self.stack.push(Value::Array(Rc::new(RefCell::new(elements))));
+        Ok(())
+    }
+
+    fn handle_get_array_index(&mut self) -> Result<(), EngineError> {
+        let index_val = self.pop_stack()?;
+        let array_val = self.pop_stack()?;
+
+        match (array_val, index_val) {
+            (Value::Array(arr), Value::I64(idx)) => {
+                let array = arr.borrow();
+                let u_idx = idx as usize;
+                if u_idx >= array.len() {
+                    return Err(EngineError::IndexOutOfBounds);
+                }
+                self.stack.push(array[u_idx].clone());
+            }
+            _ => return Err(EngineError::TypeMismatch("GetIndex requires an array and an integer index.".to_string())),
+        }
+        Ok(())
+    }
+
+    fn handle_set_array_index(&mut self) -> Result<(), EngineError> {
+        let value = self.pop_stack()?;
+        let index_val = self.pop_stack()?;
+        let array_val = self.pop_stack()?;
+
+        match (array_val, index_val) {
+            (Value::Array(arr), Value::I64(idx)) => {
+                let mut array = arr.borrow_mut();
+                let u_idx = idx as usize;
+                if u_idx >= array.len() {
+                    array.resize(u_idx + 1, Value::Null);
+                }
+                array[u_idx] = value;
+            }
+            _ => return Err(EngineError::TypeMismatch("SetIndex requires an array and an integer index.".to_string())),
+        }
+        Ok(())
+    }
+
+    fn handle_create_new_map(&mut self, num_entries: usize) -> Result<(), EngineError> {
+        if self.stack.len() < num_entries * 2 {
+            return Err(EngineError::StackUnderflow);
+        }
+        let mut map = HashMap::with_capacity(num_entries);
+        for _ in 0..num_entries {
+            let value = self.pop_stack()?;
+            let key_val = self.pop_stack()?;
+            if let Value::Str(key) = key_val {
+                map.insert(key, value);
+            } else {
+                return Err(EngineError::NonStringKey);
+            }
+        }
+        self.stack.push(Value::Map(Rc::new(RefCell::new(map))));
+        Ok(())
+    }
+
+    fn handle_get_object_field(&mut self, name_index: usize) -> Result<(), EngineError> {
+        let name = match self.current_frame()?.function.constants().get(name_index).ok_or(EngineError::InvalidOperand("Field name constant not found".to_string()))? {
+            Value::Str(s) => s.clone(),
+            _ => return Err(EngineError::TypeMismatch("Field name is not a string".to_string())),
+        };
+        let map_val = self.pop_stack()?;
+        match map_val {
+            Value::Map(map_rc) => {
+                let map = map_rc.borrow();
+                let value = map.get(&name.to_string()).cloned().unwrap_or(Value::Null);
+                self.stack.push(value);
+            }
+            _ => return Err(EngineError::TypeMismatch("GetField can only operate on maps.".to_string())),
+        }
+        Ok(())
+    }
+
+    fn handle_set_object_field(&mut self, name_index: usize) -> Result<(), EngineError> {
+        let name = match self.current_frame()?.function.constants().get(name_index).ok_or(EngineError::InvalidOperand("Field name constant not found".to_string()))? {
+            Value::Str(s) => s.clone(),
+            _ => return Err(EngineError::TypeMismatch("Field name is not a string".to_string())),
+        };
+        let value = self.pop_stack()?;
+        let map_val = self.pop_stack()?;
+
+        match map_val {
+            Value::Map(map_rc) => {
+                map_rc.borrow_mut().insert(name, value);
+            }
+            _ => return Err(EngineError::TypeMismatch("SetField can only operate on maps.".to_string())),
+        }
+        Ok(())
+    }
+
+    fn handle_throw_exception(&mut self) -> Result<(), EngineError> {
+        let exception = self.pop_stack()?;
+        if let Some(try_frame) = self.try_frames.pop() {
+            self.current_frame_mut()?.ip = try_frame.ip;
+            self.stack.truncate(try_frame.stack_size);
+            self.stack.push(exception);
+        } else {
+            return Err(EngineError::UnhandledException(exception));
+        }
+        Ok(())
+    }
+
+    fn handle_begin_try_block(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_byte()? as usize;
+        self.try_frames.push(TryFrame {
+            ip: self.current_frame()?.ip + offset,
+            stack_size: self.stack.len(),
+        });
+        Ok(())
+    }
+
+    fn handle_end_try_block(&mut self) -> Result<(), EngineError> {
+        self.try_frames.pop().ok_or(EngineError::NoTryFrame)?;
+        Ok(())
+    }
+
+    fn handle_return_from_function(&mut self) -> Result<bool, EngineError> {
+        let result = self.pop_stack()?;
+        let frame = self.frames.pop().ok_or(EngineError::NoActiveCallFrame)?;
+
+        self.stack.truncate(frame.stack_base);
+        self.stack.push(result);
+
+        Ok(self.frames.is_empty())
+    }
+
+    pub fn get_global(&self, index: usize) -> Result<Value, EngineError> {
+        self.globals.get(index).cloned().ok_or(EngineError::UndefinedVariable(format!("Global variable at index {} not found", index)))
+    }
+
+    pub fn set_global(&mut self, index: usize, value: Value) -> Result<(), EngineError> {
+        if index >= self.globals.len() {
+            return Err(EngineError::UndefinedVariable(format!("Global variable at index {} not found for setting", index)));
+        }
+        self.globals[index] = value;
+        Ok(())
+    }
+
+    pub fn define_global(&mut self, index: usize, value: Value) {
+        if index >= self.globals.len() {
+            self.globals.resize(index + 1, Value::Null);
+        }
+        self.globals[index] = value;
+    }
+
+    pub fn run(&mut self) -> Result<(), EngineError> {
+        while let Some(frame) = self.frames.last_mut() {
+            let bytecode = frame.function.bytecode.as_ref().ok_or(EngineError::InvalidOperand("Bytecode not found".to_string()))?;
+            if frame.ip >= bytecode.len() {
+                self.frames.pop();
+                continue;
+            }
+
+            let opcode: OpCode = bytecode[frame.ip].into();
+            frame.ip += 1;
+
+            match opcode {
+                OpCode::Unknown => return Err(EngineError::UnknownOpCode),
+                OpCode::NoOperation => {},
+
+                OpCode::PushConstant8 => {
+                    let constant = self.read_constant8()?;
+                    self.stack.push(constant);
+                }
+                OpCode::PushConstant16 => {
+                    let constant = self.read_constant16()?;
+                    self.stack.push(constant);
+                }
+                OpCode::PushNull => self.stack.push(Value::Null),
+                OpCode::PushTrue => self.stack.push(Value::Bool(true)),
+                OpCode::PushFalse => self.stack.push(Value::Bool(false)),
+                OpCode::PopStack => {
+                    self.pop_stack()?;
+                }
+                OpCode::DuplicateTop => {
+                    let value = self.peek_stack(0)?.clone();
+                    self.stack.push(value);
+                }
+                OpCode::SwapTopTwo => {
+                    let a = self.pop_stack()?;
+                    let b = self.pop_stack()?;
+                    self.stack.push(a);
+                    self.stack.push(b);
+                }
+                OpCode::RotateTopThree => self.handle_rotate_top_three()?,
+                OpCode::PickStackItem => self.handle_peek_stack()?,
+                OpCode::RollStackItems => self.handle_roll_stack_items()?,
+                OpCode::PeekStack => self.handle_peek_stack()?,
+                OpCode::DropMultiple => self.handle_drop_multiple()?,
+                OpCode::DuplicateMultiple => self.handle_duplicate_multiple()?,
+                OpCode::SwapTopTwoPairs => self.handle_swap_top_two_pairs()?,
+                OpCode::SwapMultiple => self.handle_swap_multiple()?,
+
+                OpCode::LoadImmediateI8 => {
+                    let value = self.read_i8()?;
+                    self.stack.push(Value::I8(value));
+                }
+                OpCode::LoadImmediateI16 => {
+                    let value = self.read_i16()?;
+                    self.stack.push(Value::I16(value));
+                }
+                OpCode::LoadImmediateI32 => {
+                    let value = self.read_i32()?;
+                    self.stack.push(Value::I32(value));
+                }
+                OpCode::LoadImmediateI64 => {
+                    let value = self.read_i64()?;
+                    self.stack.push(Value::I64(value));
+                }
+                OpCode::LoadImmediateF32 => {
+                    let value = self.read_f32()?;
+                    self.stack.push(Value::F32(value));
+                }
+                OpCode::LoadImmediateF64 => {
+                    let value = self.read_f64()?;
+                    self.stack.push(Value::F64(value));
+                }
+
+                OpCode::GetLocalVariable8 => {
+                    let slot = self.read_byte()? as usize;
+                    self.handle_get_local_variable(slot)?;
+                }
+                OpCode::GetLocalVariable16 => {
+                    let slot = self.read_u16()? as usize;
+                    self.handle_get_local_variable(slot)?
+                }
+                OpCode::SetLocalVariable8 => {
+                    let slot = self.read_byte()? as usize;
+                    self.handle_set_local_variable(slot)?;
+                }
+                OpCode::SetLocalVariable16 => {
+                    let slot = self.read_u16()? as usize;
+                    self.handle_set_local_variable(slot)?
+                }
+                OpCode::GetGlobalVariable8 => {
+                    let slot = self.read_byte()? as usize;
+                    self.handle_get_global_variable(slot)?
+                }
+                OpCode::DefineGlobalVariable8 => {
+                    let slot = self.read_byte()? as usize;
+                    self.handle_define_global_variable(slot)?
+                }
+                OpCode::SetGlobalVariable8 => {
+                    let slot = self.read_byte()? as usize;
+                    self.handle_set_global_variable(slot)?
+                }
+
+                OpCode::GetObjectProperty8 => {
+                    let name_index = self.read_byte()? as usize;
+                    self.handle_get_object_property(name_index)?
+                }
+                OpCode::GetObjectProperty16 => {
+                    let name_index = self.read_u16()? as usize;
+                    self.handle_get_object_property(name_index)?
+                }
+                OpCode::SetObjectProperty8 => {
+                    let name_index = self.read_byte()? as usize;
+                    self.handle_set_object_property(name_index)?
+                }
+                OpCode::SetObjectProperty16 => {
+                    let name_index = self.read_u16()? as usize;
+                    self.handle_set_object_property(name_index)?
+                }
+                OpCode::CreateNewInstance => self.handle_create_new_instance()?,
+                OpCode::InvokeMethod8 => {
+                    let method_name_index = self.read_byte()? as usize;
+                    let arg_count = self.read_byte()? as usize;
+                    self.handle_invoke_method(method_name_index, arg_count)?
+                }
+                OpCode::InvokeMethod16 => {
+                    let method_name_index = self.read_u16()? as usize;
+                    let arg_count = self.read_byte()? as usize;
+                    self.handle_invoke_method(method_name_index, arg_count)?
+                }
+                OpCode::CallDynamicMethod => self.handle_call_dynamic_method()?,
+                OpCode::GetSuperClassMethod8 => {
+                    let method_name_index = self.read_byte()? as usize;
+                    self.handle_get_super_class_method(method_name_index)?
+                }
+                OpCode::GetSuperClassMethod16 => {
+                    let method_name_index = self.read_u16()? as usize;
+                    self.handle_get_super_class_method(method_name_index)?
+                }
+                OpCode::DefineClass8 => {
+                    let name_index = self.read_byte()? as usize;
+                    self.handle_define_class(name_index)?
+                }
+                OpCode::DefineClass16 => {
+                    let name_index = self.read_u16()? as usize;
+                    self.handle_define_class(name_index)?
+                }
+                OpCode::InitializeClass => self.handle_initialize_class()?,
+                OpCode::CheckCastObject => self.handle_check_cast_object()?,
+                OpCode::InstanceOfCheck => self.handle_instance_of_check()?,
+                OpCode::LoadMethodHandle => self.handle_load_method_handle()?,
+                OpCode::BindMethodHandle => self.handle_bind_method_handle()?,
+                OpCode::GetVirtualTable => self.handle_get_virtual_table()?,
+                OpCode::SetVirtualTable => self.handle_set_virtual_table()?,
+                OpCode::AllocateObject => self.handle_allocate_object()?,
+                OpCode::FreeObject => self.handle_free_object()?,
+
+                OpCode::UnconditionalJump => self.handle_unconditional_jump()?,
+                OpCode::ShortJump => self.handle_short_jump()?,
+                OpCode::JumpIfTrue => self.handle_jump_if_true()?,
+                OpCode::JumpIfFalse => {
+                    self.handle_jump_if_false()?;
+                },
+                OpCode::JumpIfNull => self.handle_jump_if_null()?,
+                OpCode::JumpIfNonNull => self.handle_jump_if_non_null()?,
+                OpCode::LoopJump => {
+                    self.handle_loop_jump()?;
+                },
+                OpCode::LoopStartMarker => self.handle_loop_start_marker()?,
+                OpCode::LoopEndMarker => self.handle_loop_end_marker()?,
+                OpCode::CallFunction => self.handle_call_function()?,
+                OpCode::ReturnFromFunction => {
+                    if self.handle_return_from_function()? {
+                        break;
+                    }
+                }
+                OpCode::TailCallFunction => self.handle_tail_call_function()?,
+                OpCode::TableSwitch => self.handle_table_switch()?,
+                OpCode::LookupSwitch => self.handle_lookup_switch()?,
+                OpCode::RangeSwitch => self.handle_range_switch()?,
+                OpCode::ThrowException => self.handle_throw_exception()?,
+                OpCode::BeginTryBlock => self.handle_begin_try_block()?,
+                OpCode::CatchException => self.handle_catch_exception()?,
+                OpCode::FinallyBlock => self.handle_finally_block()?,
+                OpCode::EndTryBlock => self.handle_end_try_block()?,
+                OpCode::UnwindStack => self.handle_unwind_stack()?,
+
+                OpCode::EqualInt32 => self.handle_equal_int32()?,
+                OpCode::EqualInt64 => self.handle_equal_int64()?,
+                OpCode::EqualFloat32 => self.handle_equal_float32()?,
+                OpCode::EqualFloat64 => self.handle_equal_float64()?,
+                OpCode::NotEqualInt32 => self.handle_not_equal_int32()?,
+                OpCode::NotEqualInt64 => self.handle_not_equal_int64()?,
+                OpCode::NotEqualFloat32 => self.handle_not_equal_float32()?,
+                OpCode::NotEqualFloat64 => self.handle_not_equal_float64()?,
+                OpCode::GreaterThanInt32 => self.handle_greater_than_int32()?,
+                OpCode::LessThanInt32 => {
+                    let b = self.stack.pop().ok_or(EngineError::StackUnderflow)?;
+                    let a = self.stack.pop().ok_or(EngineError::StackUnderflow)?;
+                    match (a, b) {
+                        (Value::I32(a_val), Value::I32(b_val)) => self.stack.push(Value::Bool(a_val < b_val)),
+                        _ => return Err(EngineError::TypeMismatch("Operands for LessThanInt32 must be I32".to_string())),
+                    }
+                },
+                OpCode::GreaterThanInt64 => self.handle_greater_than_int64()?,
+                OpCode::GreaterThanFloat32 => self.handle_greater_than_float32()?,
+                OpCode::GreaterThanFloat64 => self.handle_greater_than_float64()?,
+                OpCode::LessThanInt64 => self.handle_less_than_int64()?,
+                OpCode::LessThanFloat32 => self.handle_less_than_float32()?,
+                OpCode::LessThanFloat64 => self.handle_less_than_float64()?,
+                OpCode::GreaterOrEqualInt32 => self.handle_greater_or_equal_int32()?,
+                OpCode::GreaterOrEqualInt64 => self.handle_greater_or_equal_int64()?,
+                OpCode::GreaterOrEqualFloat32 => self.handle_greater_or_equal_float32()?,
+                OpCode::GreaterOrEqualFloat64 => self.handle_greater_or_equal_float64()?,
+                OpCode::LessOrEqualInt32 => self.handle_less_or_equal_int32()?,
+                OpCode::LessOrEqualInt64 => self.handle_less_or_equal_int64()?,
+                OpCode::LessOrEqualFloat32 => self.handle_less_or_equal_float32()?,
+                OpCode::LessOrEqualFloat64 => self.handle_less_or_equal_float64()?,
+                OpCode::CompareAndBranchEqualInt32 => self.handle_compare_and_branch_equal_int32()?,
+                OpCode::CompareAndBranchNotEqualInt32 => self.handle_compare_and_branch_not_equal_int32()?,
+                OpCode::CompareAndBranchLessThanInt32 => self.handle_compare_and_branch_less_than_int32()?,
+                OpCode::CompareAndBranchGreaterThanInt32 => self.handle_compare_and_branch_greater_than_int32()?,
+
+                OpCode::GreaterUnsigned8 => self.handle_greater_unsigned8()?,
+                OpCode::GreaterUnsigned16 => self.handle_greater_unsigned16()?,
+                OpCode::GreaterUnsigned32 => self.handle_greater_unsigned32()?,
+                OpCode::GreaterUnsigned64 => self.handle_greater_unsigned64()?,
+                OpCode::LessUnsigned8 => self.handle_less_unsigned8()?,
+                OpCode::LessUnsigned16 => self.handle_less_unsigned16()?,
+                OpCode::LessUnsigned32 => self.handle_less_unsigned32()?,
+                OpCode::LessUnsigned64 => self.handle_less_unsigned64()?,
+                OpCode::GreaterOrEqualUnsigned8 => self.handle_greater_or_equal_unsigned8()?,
+                OpCode::GreaterOrEqualUnsigned16 => self.handle_greater_or_equal_unsigned16()?,
+                OpCode::GreaterOrEqualUnsigned32 => self.handle_greater_or_equal_unsigned32()?,
+                OpCode::GreaterOrEqualUnsigned64 => self.handle_greater_or_equal_unsigned64()?,
+                OpCode::LessOrEqualUnsigned8 => self.handle_less_or_equal_unsigned8()?,
+                OpCode::LessOrEqualUnsigned16 => self.handle_less_or_equal_unsigned16()?,
+                OpCode::LessOrEqualUnsigned32 => self.handle_less_or_equal_unsigned32()?,
+                OpCode::LessOrEqualUnsigned64 => self.handle_less_or_equal_unsigned64()?,
+                OpCode::ConvertInt32ToInt64 => self.handle_convert_int32_to_int64()?,
+                OpCode::ConvertInt32ToFloat32 => self.handle_convert_int32_to_float32()?,
+                OpCode::ConvertInt32ToFloat64 => self.handle_convert_int32_to_float64()?,
+                OpCode::ConvertInt64ToInt32 => self.handle_convert_int64_to_int32()?,
+                OpCode::ConvertInt64ToFloat32 => self.handle_convert_int64_to_float32()?,
+                OpCode::ConvertInt64ToFloat64 => self.handle_convert_int64_to_float64()?,
+                OpCode::ConvertFloat32ToInt32 => self.handle_convert_float32_to_int32()?,
+                OpCode::ConvertFloat32ToInt64 => self.handle_convert_float32_to_int64()?,
+                OpCode::ConvertFloat32ToFloat64 => self.handle_convert_float32_to_float64()?,
+                OpCode::ConvertFloat64ToInt32 => self.handle_convert_float64_to_int32()?,
+                OpCode::ConvertFloat64ToInt64 => self.handle_convert_float64_to_int64()?,
+                OpCode::ConvertFloat64ToFloat32 => self.handle_convert_float64_to_float32()?,
+
+                OpCode::LogicalAndOperation => self.handle_logical_and_operation()?,
+                OpCode::LogicalOrOperation => self.handle_logical_or_operation()?,
+                OpCode::LogicalNotOperation => self.handle_logical_not_operation()?,
+                OpCode::BooleanAndOperation => self.handle_boolean_and_operation()?,
+                OpCode::BooleanOrOperation => self.handle_boolean_or_operation()?,
+
+                OpCode::AddInt32 => {
+                    let b = self.stack.pop().ok_or(EngineError::StackUnderflow)?;
+                    let a = self.stack.pop().ok_or(EngineError::StackUnderflow)?;
+                    match (a, b) {
+                        (Value::I32(a_val), Value::I32(b_val)) => self.stack.push(Value::I32(a_val + b_val)),
+                        _ => return Err(EngineError::TypeMismatch("Operands for AddInt32 must be I32".to_string())),
+                    }
+                },
+                OpCode::AddInt64 => self.handle_add_int64()?,
+                OpCode::AddFloat32 => self.handle_add_float32()?,
+                OpCode::AddFloat64 => self.handle_add_float64()?,
+                OpCode::SubtractInt32 => self.handle_subtract_int32()?,
+                OpCode::SubtractInt64 => self.handle_subtract_int64()?,
+                OpCode::SubtractFloat32 => self.handle_subtract_float32()?,
+                OpCode::SubtractFloat64 => self.handle_subtract_float64()?,
+                OpCode::MultiplyInt32 => self.handle_multiply_int32()?,
+                OpCode::MultiplyInt64 => self.handle_multiply_int64()?,
+                OpCode::MultiplyFloat32 => self.handle_multiply_float32()?,
+                OpCode::MultiplyFloat64 => self.handle_multiply_float64()?,
+                OpCode::DivideInt32 => self.handle_divide_int32()?,
+                OpCode::DivideInt64 => self.handle_divide_int64()?,
+                OpCode::DivideFloat32 => self.handle_divide_float32()?,
+                OpCode::DivideFloat64 => self.handle_divide_float64()?,
+                OpCode::ModuloInt32 => self.handle_modulo_int32()?,
+                OpCode::ModuloInt64 => self.handle_modulo_int64()?,
+                OpCode::NegateInt32 => self.handle_negate_int32()?,
+                OpCode::NegateInt64 => self.handle_negate_int64()?,
+                OpCode::NegateFloat32 => self.handle_negate_float32()?,
+                OpCode::NegateFloat64 => self.handle_negate_float64()?,
+                OpCode::IncrementInt32 => self.handle_increment_int32()?,
+                OpCode::DecrementInt32 => self.handle_decrement_int32()?,
+                OpCode::IncrementInt64 => self.handle_increment_int64()?,
+                OpCode::DecrementInt64 => self.handle_decrement_int64()?,
+                OpCode::AddInt32WithConstant => self.handle_add_int32_with_constant()?,
+                OpCode::AddInt64WithConstant => self.handle_add_int64_with_constant()?,
+                OpCode::MultiplyInt32WithConstant => self.handle_multiply_int32_with_constant()?,
+                OpCode::MultiplyInt64WithConstant => self.handle_multiply_int64_with_constant()?,
+                OpCode::FusedMultiplyAddFloat32 => self.handle_fused_multiply_add_float32()?,
+                OpCode::FusedMultiplyAddFloat64 => self.handle_fused_multiply_add_float64()?,
+                OpCode::AbsoluteInt32 => self.handle_absolute_int32()?,
+                OpCode::AbsoluteInt64 => self.handle_absolute_int64()?,
+                OpCode::AbsoluteFloat32 => self.handle_absolute_float32()?,
+                OpCode::AbsoluteFloat64 => self.handle_absolute_float64()?,
+                OpCode::FloorFloat32 => self.handle_floor_float32()?,
+                OpCode::CeilFloat32 => self.handle_ceil_float32()?,
+                OpCode::RoundFloat32 => self.handle_round_float32()?,
+                OpCode::TruncateFloat32 => self.handle_truncate_float32()?,
+                OpCode::SquareRootFloat32 => self.handle_square_root_float32()?,
+                OpCode::SquareRootFloat64 => self.handle_square_root_float64()?,
+
+                OpCode::BitwiseAndInt32 => self.handle_bitwise_and_int32()?,
+                OpCode::BitwiseOrInt32 => self.handle_bitwise_or_int32()?,
+                OpCode::BitwiseXorInt32 => self.handle_bitwise_xor_int32()?,
+                OpCode::BitwiseNotInt32 => self.handle_bitwise_not_int32()?,
+                OpCode::BitwiseAndInt64 => self.handle_bitwise_and_int64()?,
+                OpCode::BitwiseOrInt64 => self.handle_bitwise_or_int64()?,
+                OpCode::BitwiseXorInt64 => self.handle_bitwise_xor_int64()?,
+                OpCode::BitwiseNotInt64 => self.handle_bitwise_not_int64()?,
+                OpCode::LeftShiftInt32 => self.handle_left_shift_int32()?,
+                OpCode::LeftShiftInt64 => self.handle_left_shift_int64()?,
+                OpCode::RightShiftInt32 => self.handle_right_shift_int32()?,
+                OpCode::RightShiftInt64 => self.handle_right_shift_int64()?,
+                OpCode::UnsignedRightShiftInt32 => self.handle_unsigned_right_shift_int32()?,
+                OpCode::UnsignedRightShiftInt64 => self.handle_unsigned_right_shift_int64()?,
+                OpCode::RotateLeftInt32 => self.handle_rotate_left_int32()?,
+                OpCode::RotateRightInt32 => self.handle_rotate_right_int32()?,
+
+                OpCode::CreateNewArray8 => {
+                    let num_elements = self.read_byte()? as usize;
+                    self.handle_create_new_array(num_elements)?
+                }
+                OpCode::CreateNewArray16 => {
+                    let num_elements = self.read_u16()? as usize;
+                    self.handle_create_new_array(num_elements)?
+                }
+                OpCode::GetArrayLength => self.handle_get_array_length()?,
+                OpCode::ResizeArray => self.handle_resize_array()?,
+                OpCode::GetArrayIndexInt32 => self.handle_get_array_index()?,
+                OpCode::SetArrayIndexInt32 => self.handle_set_array_index()?,
+                OpCode::GetArrayIndexFloat32 => self.handle_get_array_index_float32()?,
+                OpCode::SetArrayIndexFloat32 => self.handle_set_array_index_float32()?,
+                OpCode::GetArrayIndexFastInt32 => self.handle_get_array_index_fast_int32()?,
+                OpCode::SetArrayIndexFastInt32 => self.handle_set_array_index_fast_int32()?,
+                OpCode::CreateNewMap8 => {
+                    let num_entries = self.read_byte()? as usize;
+                    self.handle_create_new_map(num_entries)?
+                }
+                OpCode::CreateNewMap16 => {
+                    let num_entries = self.read_u16()? as usize;
+                    self.handle_create_new_map(num_entries)?
+                }
+                OpCode::MapContainsKey => self.handle_map_contains_key()?,
+                OpCode::MapRemoveKey => self.handle_map_remove_key()?,
+                OpCode::MapGetOrDefaultValue => self.handle_map_get_or_default_value()?,
+                OpCode::GetObjectField8 => {
+                    let name_index = self.read_byte()? as usize;
+                    self.handle_get_object_field(name_index)?
+                }
+                OpCode::GetObjectField16 => {
+                    let name_index = self.read_u16()? as usize;
+                    self.handle_get_object_field(name_index)?
+                }
+                OpCode::SetObjectField8 => {
+                    let name_index = self.read_byte()? as usize;
+                    self.handle_set_object_field(name_index)?
+                }
+                OpCode::SetObjectField16 => {
+                    let name_index = self.read_u16()? as usize;
+                    self.handle_set_object_field(name_index)?
+                }
+                OpCode::SpawnDetached => self.handle_spawn_detached()?,
+
+                OpCode::AtomicAddInt32 => self.handle_atomic_add_int32()?,
+                OpCode::AtomicSubtractInt32 => self.handle_atomic_subtract_int32()?,
+                OpCode::AtomicCompareAndSwapInt32 => self.handle_atomic_compare_and_swap_int32()?,
+                OpCode::EnterMonitor => self.handle_enter_monitor()?,
+                OpCode::ExitMonitor => self.handle_exit_monitor()?,
+                OpCode::YieldCurrentThread => self.handle_yield_current_thread()?,
+
+                OpCode::CallWithInlineCache => self.handle_call_with_inline_cache()?,
+                OpCode::CallWithInlineCacheInline => self.handle_call_with_inline_cache_inline()?,
+                OpCode::GetPropertyWithInlineCache => self.handle_get_property_with_inline_cache()?,
+                OpCode::GetPropertyWithInlineCacheInline => self.handle_get_property_with_inline_cache_inline()?,
+                OpCode::SetPropertyWithInlineCache => self.handle_set_property_with_inline_cache()?,
+                OpCode::LoadMethodInlineCache => self.handle_load_method_inline_cache()?,
+                OpCode::MegamorphicMethodCall => self.handle_megamorphic_method_call()?,
+
+                OpCode::PrintTopOfStack => {
+                    self.handle_print_top_of_stack()?;
+                },
+                OpCode::Print => {
+                    if let Ok(val) = self.pop_stack() {
+                        println!("{:?}", val);
+                    }
+                }
+                OpCode::Add => self.handle_add_generic()?,
+                OpCode::Halt => {
+                    self.frames.clear();
+                    return Ok(());
+                }
+
+                
+                OpCode::AllocStackStruct => self.handle_alloc_stack_struct()?,
+                OpCode::AllocStruct => self.handle_alloc_struct()?,
+                OpCode::GetStructField => self.handle_get_struct_field()?,
+                OpCode::SetStructField => self.handle_set_struct_field()?,
+                OpCode::GetStructFieldPtr => self.handle_get_struct_field_ptr()?,
+                OpCode::CallMethod => self.handle_call_method()?,
+                OpCode::AllocRaw => self.handle_alloc_raw()?,
+                OpCode::FreeRaw => self.handle_free_raw()?,
+                OpCode::LoadPtr => self.handle_load_ptr()?,
+                OpCode::StorePtr => self.handle_store_ptr()?,
+                OpCode::OffsetPtr => self.handle_offset_ptr()?,
+
+                
+                OpCode::KernelLaunch => self.handle_kernel_launch()?,
+                OpCode::DeviceMemoryAlloc => self.handle_device_memory_alloc()?,
+                OpCode::CopyToDevice => self.handle_copy_to_device()?,
+                OpCode::CopyFromDevice => self.handle_copy_from_device()?,
+
+                
+                OpCode::AddInt8 => self.handle_add_int8()?,
+                OpCode::AddInt16 => self.handle_add_int16()?,
+                OpCode::SubtractInt8 => self.handle_sub_int8()?,
+                OpCode::SubtractInt16 => self.handle_sub_int16()?,
+                OpCode::MultiplyInt8 => self.handle_mul_int8()?,
+                OpCode::MultiplyInt16 => self.handle_mul_int16()?,
+                OpCode::DivideInt8 => self.handle_div_int8()?,
+                OpCode::DivideInt16 => self.handle_div_int16()?,
+                OpCode::DivideUnsigned32 => self.handle_div_unsigned_32()?,
+                OpCode::DivideUnsigned64 => self.handle_div_unsigned_64()?,
+                OpCode::ModuloFloat32 => self.handle_modulo_float32()?,
+                OpCode::ModuloFloat64 => self.handle_modulo_float64()?,
+            }
+        }
+        Ok(())
+    }
+
+    pub fn execute_paper(&mut self, paper: &crate::builder::paper::Paper) -> Result<Option<Value>, EngineError> {
+        
+        for part in &paper.parts {
+            if let crate::builder::part::Part::KernelLaunch { grid_dim, block_dim, body, .. } = part {
+                let sub_paper = crate::builder::paper::Paper::new("VmKernel", body.clone());
+                let total_blocks = (grid_dim.0 * grid_dim.1 * grid_dim.2) as usize;
+                let threads_per_block = (block_dim.0 * block_dim.1 * block_dim.2) as usize;
+                let mut last_res = None;
+                for b in 0..total_blocks {
+                    for t in 0..threads_per_block {
+                        let gid = b * threads_per_block + t;
+                        let mut sub_vm = IrisEngine::new().with_thread_context(gid, t, b);
+                        last_res = sub_vm.execute_paper(&sub_paper)?;
+                    }
+                }
+                return Ok(last_res);
+            }
+        }
+
+        let context = inkwell::context::Context::create();
+        let module = context.create_module(&paper.name);
+        let rfc = crate::builder::compiler::RuntimeFunctionCompiler::new(&context, module);
+        let chunk = rfc.ivm_compile(paper.clone()).ok_or_else(|| EngineError::InvalidOperand("Failed to compile Paper to bytecode".into()))?;
+
+        let function = Rc::new(Function::new_bytecode(paper.name.clone(), 0, chunk.code, chunk.constants));
+        self.stack.push(Value::I64(self.global_id as i64));
+        self.stack.push(Value::I64(self.thread_idx as i64));
+        self.stack.push(Value::I64(self.block_idx as i64));
+        self.push_frame(function, 3)?;
+        self.run()?;
+        Ok(self.stack.pop())
+    }
+
+    fn handle_add_generic(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        match (lhs, rhs) {
+            (Value::I8(a), Value::I8(b)) => self.stack.push(Value::I8(a.wrapping_add(b))),
+            (Value::I16(a), Value::I16(b)) => self.stack.push(Value::I16(a.wrapping_add(b))),
+            (Value::I32(a), Value::I32(b)) => self.stack.push(Value::I32(a.wrapping_add(b))),
+            (Value::I64(a), Value::I64(b)) => self.stack.push(Value::I64(a.wrapping_add(b))),
+            (Value::F32(a), Value::F32(b)) => self.stack.push(Value::F32(a + b)),
+            (Value::F64(a), Value::F64(b)) => self.stack.push(Value::F64(a + b)),
+            _ => return Err(EngineError::TypeMismatch("Add expects numeric operands".into())),
+        }
+        Ok(())
+    }
+
+    fn handle_alloc_stack_struct(&mut self) -> Result<(), EngineError> {
+        let size = self.read_u16()? as usize;
+        self.stack.push(Value::RawMemory(Rc::new(RefCell::new(vec![0u8; size.max(16)]))));
+        Ok(())
+    }
+
+    fn handle_alloc_struct(&mut self) -> Result<(), EngineError> {
+        let size = self.read_u16()? as usize;
+        self.stack.push(Value::RawMemory(Rc::new(RefCell::new(vec![0u8; size.max(16)]))));
+        Ok(())
+    }
+
+    fn handle_get_struct_field(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let size_code = self.read_byte()?;
+        let target = self.pop_stack()?;
+        if let Value::RawMemory(mem) = target {
+            let bytes = mem.borrow();
+            match size_code {
+                8 => {
+                    let v = bytes.get(offset).copied().unwrap_or(0);
+                    self.stack.push(Value::I8(v as i8));
+                }
+                16 => {
+                    let slice = bytes.get(offset..offset + 2).unwrap_or(&[0, 0]);
+                    let v = i16::from_le_bytes(slice.try_into().unwrap());
+                    self.stack.push(Value::I16(v));
+                }
+                32 => {
+                    let slice = bytes.get(offset..offset + 4).unwrap_or(&[0, 0, 0, 0]);
+                    let v = i32::from_le_bytes(slice.try_into().unwrap());
+                    self.stack.push(Value::I32(v));
+                }
+                64 => {
+                    let slice = bytes.get(offset..offset + 8).unwrap_or(&[0, 0, 0, 0, 0, 0, 0, 0]);
+                    let v = i64::from_le_bytes(slice.try_into().unwrap());
+                    self.stack.push(Value::I64(v));
+                }
+                _ => self.stack.push(Value::I32(0)),
+            }
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("GetStructField expected RawMemory".into()))
+        }
+    }
+
+    fn handle_set_struct_field(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        let size_code = self.read_byte()?;
+        let val = self.pop_stack()?;
+        let target = self.peek_stack(0)?.clone();
+        if let Value::RawMemory(mem) = target {
+            let mut bytes = mem.borrow_mut();
+            let sz = (size_code as usize / 8).max(1);
+            if bytes.len() < offset + sz {
+                bytes.resize(offset + sz, 0);
+            }
+            match val {
+                Value::I8(v) => bytes[offset] = v as u8,
+                Value::I16(v) => bytes[offset..offset + 2].copy_from_slice(&v.to_le_bytes()),
+                Value::I32(v) => bytes[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
+                Value::I64(v) => bytes[offset..offset + 8].copy_from_slice(&v.to_le_bytes()),
+                Value::F32(v) => bytes[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
+                Value::F64(v) => bytes[offset..offset + 8].copy_from_slice(&v.to_le_bytes()),
+                _ => {}
+            }
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("SetStructField expected RawMemory".into()))
+        }
+    }
+
+    fn handle_get_struct_field_ptr(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_u16()? as usize;
+        self.stack.push(Value::Pointer(offset));
+        Ok(())
+    }
+
+    fn handle_call_method(&mut self) -> Result<(), EngineError> {
+        let _method_index = self.read_u16()?;
+        Ok(())
+    }
+
+    fn handle_alloc_raw(&mut self) -> Result<(), EngineError> {
+        let size = self.read_u16()? as usize;
+        self.stack.push(Value::RawMemory(Rc::new(RefCell::new(vec![0u8; size]))));
+        Ok(())
+    }
+
+    fn handle_free_raw(&mut self) -> Result<(), EngineError> {
+        let _ = self.pop_stack()?;
+        Ok(())
+    }
+
+    fn handle_load_ptr(&mut self) -> Result<(), EngineError> {
+        let size_code = self.read_byte()?;
+        let ptr = self.pop_stack()?;
+        match ptr {
+            Value::Pointer(addr) => {
+                match size_code {
+                    32 => self.stack.push(Value::I32(addr as i32)),
+                    64 => self.stack.push(Value::I64(addr as i64)),
+                    _ => self.stack.push(Value::I32(0)),
+                }
+                Ok(())
+            }
+            _ => Err(EngineError::TypeMismatch("LoadPtr expected Pointer".into())),
+        }
+    }
+
+    fn handle_store_ptr(&mut self) -> Result<(), EngineError> {
+        let _size_code = self.read_byte()?;
+        let _val = self.pop_stack()?;
+        let _ptr = self.pop_stack()?;
+        Ok(())
+    }
+
+    fn handle_offset_ptr(&mut self) -> Result<(), EngineError> {
+        let offset = self.read_i16()? as i64;
+        let ptr = self.pop_stack()?;
+        if let Value::Pointer(addr) = ptr {
+            self.stack.push(Value::Pointer((addr as i64 + offset) as usize));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("OffsetPtr expected Pointer".into()))
+        }
+    }
+
+    fn handle_kernel_launch(&mut self) -> Result<(), EngineError> {
+        let _kernel_idx = self.read_u16()?;
+        Ok(())
+    }
+
+    fn handle_device_memory_alloc(&mut self) -> Result<(), EngineError> {
+        let size = self.read_u16()? as usize;
+        self.stack.push(Value::RawMemory(Rc::new(RefCell::new(vec![0u8; size]))));
+        Ok(())
+    }
+
+    fn handle_copy_to_device(&mut self) -> Result<(), EngineError> {
+        let _buf_idx = self.read_u16()?;
+        Ok(())
+    }
+
+    fn handle_copy_from_device(&mut self) -> Result<(), EngineError> {
+        let _buf_idx = self.read_u16()?;
+        Ok(())
+    }
+
+    fn handle_add_int8(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I8(a), Value::I8(b)) = (lhs, rhs) {
+            self.stack.push(Value::I8(a.wrapping_add(b)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I8".into()))
+        }
+    }
+
+    fn handle_add_int16(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I16(a), Value::I16(b)) = (lhs, rhs) {
+            self.stack.push(Value::I16(a.wrapping_add(b)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I16".into()))
+        }
+    }
+
+    fn handle_sub_int8(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I8(a), Value::I8(b)) = (lhs, rhs) {
+            self.stack.push(Value::I8(a.wrapping_sub(b)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I8".into()))
+        }
+    }
+
+    fn handle_sub_int16(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I16(a), Value::I16(b)) = (lhs, rhs) {
+            self.stack.push(Value::I16(a.wrapping_sub(b)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I16".into()))
+        }
+    }
+
+    fn handle_mul_int8(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I8(a), Value::I8(b)) = (lhs, rhs) {
+            self.stack.push(Value::I8(a.wrapping_mul(b)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I8".into()))
+        }
+    }
+
+    fn handle_mul_int16(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I16(a), Value::I16(b)) = (lhs, rhs) {
+            self.stack.push(Value::I16(a.wrapping_mul(b)));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I16".into()))
+        }
+    }
+
+    fn handle_div_int8(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I8(a), Value::I8(b)) = (lhs, rhs) {
+            if b == 0 { return Err(EngineError::DivisionByZero); }
+            self.stack.push(Value::I8(a / b));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I8".into()))
+        }
+    }
+
+    fn handle_div_int16(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::I16(a), Value::I16(b)) = (lhs, rhs) {
+            if b == 0 { return Err(EngineError::DivisionByZero); }
+            self.stack.push(Value::I16(a / b));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected I16".into()))
+        }
+    }
+
+    fn handle_div_unsigned_32(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        match (lhs, rhs) {
+            (Value::I32(a), Value::I32(b)) => {
+                let (ua, ub) = (a as u32, b as u32);
+                if ub == 0 { return Err(EngineError::DivisionByZero); }
+                self.stack.push(Value::I32((ua / ub) as i32));
+                Ok(())
+            }
+            _ => Err(EngineError::TypeMismatch("Expected I32".into())),
+        }
+    }
+
+    fn handle_div_unsigned_64(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        match (lhs, rhs) {
+            (Value::I64(a), Value::I64(b)) => {
+                let (ua, ub) = (a as u64, b as u64);
+                if ub == 0 { return Err(EngineError::DivisionByZero); }
+                self.stack.push(Value::I64((ua / ub) as i64));
+                Ok(())
+            }
+            _ => Err(EngineError::TypeMismatch("Expected I64".into())),
+        }
+    }
+
+    fn handle_modulo_float32(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::F32(a), Value::F32(b)) = (lhs, rhs) {
+            self.stack.push(Value::F32(a % b));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected F32".into()))
+        }
+    }
+
+    fn handle_modulo_float64(&mut self) -> Result<(), EngineError> {
+        let rhs = self.pop_stack()?;
+        let lhs = self.pop_stack()?;
+        if let (Value::F64(a), Value::F64(b)) = (lhs, rhs) {
+            self.stack.push(Value::F64(a % b));
+            Ok(())
+        } else {
+            Err(EngineError::TypeMismatch("Expected F64".into()))
+        }
+    }
+}
