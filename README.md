@@ -27,7 +27,7 @@ flowchart TD
         Paper -->|Interpret| VM["Iris VM (Stack Interpreter)"]
         Paper -->|JIT Compile| CPU["LLVM CPU JIT Engine"]
         Paper -->|Parallel JIT| CPUP["Multithreaded CPU Parallel"]
-        Paper -->|Dispatch Compute| GPU["Vulkan Compute & GPU Simulator"]
+        Paper -->|Dispatch Compute| GPU["MLIR > Vulkan Compute & GPU Simulator"]
         Paper -->|AOT Compile| Native["Native Compiler (LLVM Backend)"]
     end
 
