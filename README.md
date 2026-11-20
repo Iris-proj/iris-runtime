@@ -124,9 +124,9 @@ iris build app.paper --emit ll  -o my_app.ll
 # Cross-compilation target specification
 iris build app.paper --target-triple x86_64-unknown-linux-gnu --cpu skylake -O 3
 ```
+And! Build best of Iris using `--pure`.
 
 ---
-And! Build best of Iris using `--pure`.
 
 ## Rust API Usage
 
