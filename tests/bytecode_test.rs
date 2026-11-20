@@ -19,18 +19,18 @@ fn test_ic_file() {
     assert_eq!(function.bytecode, loaded_function.bytecode);
     assert_eq!(function.constants.len(), loaded_function.constants.len());
 
-    
+
 }
 
 #[test]
 fn test_ii_file() {
-    
+
     let mut chunk1 = Chunk::new();
     chunk1.write(OpCode::LoadImmediateI32); chunk1.write(1i32);
     let function1 = Function::new_bytecode("func1".to_string(), 0, chunk1.code, chunk1.constants);
     save_function(&function1, "func1.ic").unwrap();
 
-    
+
     let mut chunk2 = Chunk::new();
     chunk2.write(OpCode::LoadImmediateI32); chunk2.write(2i32);
     let function2 = Function::new_bytecode("func2".to_string(), 0, chunk2.code, chunk2.constants);

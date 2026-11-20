@@ -65,7 +65,7 @@ impl Paper {
         self
     }
 
-    
+
     pub fn register(&self) -> &Self {
         crate::vm::pool::register_global_paper(self.clone());
         self
@@ -89,13 +89,12 @@ impl Paper {
         self
     }
 
-    
+
     pub fn run_vm(&self, engine: &mut IrisEngine) -> Result<Option<Value>, EngineError> {
         engine.execute_paper(self)
     }
 
-    
-    
+
     pub fn run_cpu<'ctx>(
         &self,
         rfc: &RuntimeFunctionCompiler<'ctx>,
@@ -130,7 +129,7 @@ impl Paper {
         Ok(ret)
     }
 
-    /// Executes this Paper in parallel across multiple CPU hardware threads using workgroups.
+
     pub fn run_cpu_parallel<'ctx>(
         &self,
         rfc: &RuntimeFunctionCompiler<'ctx>,
@@ -223,12 +222,12 @@ impl Paper {
         })
     }
 
-    
+
     pub fn run_gpu(&self, gpu: &mut GpuDevice) -> Result<GpuExecutionResult, String> {
         gpu.execute_paper(self)
     }
 
-    
+
     pub fn execute<'a, 'ctx>(&self, target: ExecutionTarget<'a, 'ctx>) -> Result<ExecutionResult, String> {
         match target {
             ExecutionTarget::Vm(engine) => {
@@ -265,7 +264,7 @@ impl Paper {
         }
     }
 
-    
+
     pub fn build_native_executable(&self, output_path: impl AsRef<std::path::Path>, opt: inkwell::OptimizationLevel) -> Result<(), String> {
         let context = inkwell::context::Context::create();
         let mut compiler = crate::builder::native::NativeCompiler::new(&context, &self.name);
@@ -277,7 +276,19 @@ impl Paper {
         compiler.build_executable(output_path.as_ref(), &config)
     }
 
-    
+
+    pub fn build_native_executable_pure(&self, output_path: impl AsRef<std::path::Path>, opt: inkwell::OptimizationLevel) -> Result<(), String> {
+        let context = inkwell::context::Context::create();
+        let mut compiler = crate::builder::native::NativeCompiler::new(&context, &self.name);
+        compiler.compile_paper_pure(self)?;
+        compiler.emit_main_pure(&self.name)?;
+        let mut config = crate::builder::native::NativeBuildConfig::default();
+        config.opt_level = opt;
+        config.pure_aot = true;
+        compiler.build_executable(output_path.as_ref(), &config)
+    }
+
+
     pub fn build_native_object(&self, output_path: impl AsRef<std::path::Path>, opt: inkwell::OptimizationLevel) -> Result<(), String> {
         let context = inkwell::context::Context::create();
         let mut compiler = crate::builder::native::NativeCompiler::new(&context, &self.name);
@@ -289,7 +300,7 @@ impl Paper {
         compiler.emit_object_file(output_path.as_ref(), &config)
     }
 
-    
+
     pub fn build_native_assembly(&self, output_path: impl AsRef<std::path::Path>, opt: inkwell::OptimizationLevel) -> Result<(), String> {
         let context = inkwell::context::Context::create();
         let mut compiler = crate::builder::native::NativeCompiler::new(&context, &self.name);
@@ -300,7 +311,7 @@ impl Paper {
         compiler.emit_assembly(output_path.as_ref(), &config)
     }
 
-    
+
     pub fn build_native_bitcode(&self, output_path: impl AsRef<std::path::Path>) -> Result<(), String> {
         let context = inkwell::context::Context::create();
         let mut compiler = crate::builder::native::NativeCompiler::new(&context, &self.name);
@@ -309,7 +320,7 @@ impl Paper {
         compiler.emit_bitcode(output_path.as_ref())
     }
 
-    
+
     pub fn build_native_ir(&self, output_path: impl AsRef<std::path::Path>) -> Result<(), String> {
         let context = inkwell::context::Context::create();
         let mut compiler = crate::builder::native::NativeCompiler::new(&context, &self.name);
@@ -318,7 +329,7 @@ impl Paper {
         compiler.emit_llvm_ir(output_path.as_ref())
     }
 
-    
+
     pub fn run_native(&self, opt: inkwell::OptimizationLevel) -> Result<(i32, String), String> {
         let temp_dir = std::env::temp_dir();
         let unique_id = std::time::SystemTime::now()
@@ -344,14 +355,14 @@ impl Paper {
         Ok((code, stdout))
     }
 
-    
+
     pub fn save_binary(&self, path: impl AsRef<std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
         let encoded = bincode::serde::encode_to_vec(self, bincode::config::standard())?;
         std::fs::write(path, encoded)?;
         Ok(())
     }
 
-    
+
     pub fn load_binary(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
         let (paper, _): (Self, usize) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())?;

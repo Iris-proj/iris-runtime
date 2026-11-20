@@ -33,7 +33,7 @@ pub struct MlirCompiler<'c> {
 }
 
 impl<'c> MlirCompiler<'c> {
-    /// Creates a new MlirCompiler, registering all available MLIR dialects.
+
     pub fn new(context: &'c Context) -> Self {
         let registry = melior::dialect::DialectRegistry::new();
         context.append_dialect_registry(&registry);
@@ -44,26 +44,26 @@ impl<'c> MlirCompiler<'c> {
         Self { context, module }
     }
 
-    
+
     pub fn module(&self) -> &Module<'c> {
         &self.module
     }
 
-    /// Verifies the structural and semantic validity of the compiled MLIR module.
+
     pub fn verify(&self) -> bool {
         self.module.as_operation().verify()
     }
 
-    /// Returns the text representation of the MLIR module.
+
     pub fn to_string(&self) -> String {
         self.module.as_operation().to_string()
     }
 
-    /// Compiles a `Paper` function definition into MLIR operations within this module.
+
     pub fn compile_paper(&mut self, paper: &Paper) -> Result<(), String> {
         let location = Location::unknown(self.context);
 
-        // Determine return signature
+
         let has_int_return = paper.parts.iter().any(|p| matches!(p, Part::ReturnInteger));
         let return_types: Vec<Type<'c>> = if has_int_return {
             vec![IntegerType::new(self.context, 64).into()]
@@ -94,7 +94,7 @@ impl<'c> MlirCompiler<'c> {
         Ok(())
     }
 
-    
+
     pub fn create_execution_engine(
         &self,
         optimization_level: usize,
@@ -103,7 +103,7 @@ impl<'c> MlirCompiler<'c> {
         ExecutionEngine::new(&self.module, optimization_level, shared_library_paths, false, true)
     }
 
-    
+
     pub fn execute(
         &self,
         entry_func: &str,
@@ -170,7 +170,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
         }
     }
 
-    
+
     fn emit_runtime_call(
         &mut self,
         block: BlockRef<'c, 'a>,
@@ -210,7 +210,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
         let mut current_block = entry_block;
         let mut label_blocks: HashMap<String, BlockRef<'c, 'a>> = HashMap::new();
 
-        // Pre-scan for labels and create basic blocks in region
+
         for part in &paper.parts {
             if let Part::Label(label_name) = part {
                 let block = region.append_block(Block::new(&[]));
@@ -357,7 +357,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
             }
         }
 
-        // Ensure current block has a terminator
+
         if current_block.terminator().is_none() {
             let ret_op = if let Some(val) = self.stack.pop() {
                 func::r#return(&[val], self.location)
@@ -373,7 +373,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
     fn lower_part(&mut self, block: BlockRef<'c, 'a>, part: &Part) -> Result<(), String> {
         let location = self.location;
         match part {
-            // --- Stack Operations ---
+
             Part::Pop => {
                 self.pop_value()?;
             }
@@ -440,7 +440,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 block.append_operation(ret_op);
             }
 
-            // --- Basic Operations ---
+
             Part::Bool(val) => {
                 let ty = IntegerType::new(self.context, 1).into();
                 let attr = IntegerAttribute::new(ty, if *val { 1 } else { 0 });
@@ -460,7 +460,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 block.append_operation(call_op);
             }
 
-            // --- Integer Operations ---
+
             Part::Integer(size, val, _unsigned) => {
                 let ty = self.size_to_integer_type(*size);
                 let attr = IntegerAttribute::new(ty, *val as i64);
@@ -546,7 +546,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 }
             }
 
-            // --- Decimal Operations ---
+
             Part::Decimal(size, val) => {
                 let ty = self.size_to_float_type(*size)?;
                 let attr = FloatAttribute::new(self.context, ty, *val);
@@ -611,7 +611,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.push_value(op_ref.result(0).map_err(|e| e.to_string())?.into());
             }
 
-            // --- Extended Math Operations ---
+
             Part::UnaryMath(size, math_op) => {
                 let val = self.pop_value()?;
                 match math_op {
@@ -687,7 +687,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.push_value(res);
             }
 
-            // --- Type Conversions ---
+
             Part::IntegerToDecimal(unsigned, to_size) => {
                 let val = self.pop_value()?;
                 let to_ty = self.size_to_float_type(*to_size)?;
@@ -711,7 +711,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.push_value(op_ref.result(0).map_err(|e| e.to_string())?.into());
             }
 
-            // --- Bitwise & Logic ---
+
             Part::BinaryOperation(op) => {
                 let rhs = self.pop_value()?;
                 let lhs = self.pop_value()?;
@@ -740,7 +740,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.push_value(res);
             }
             Part::Bitcast(_from, _to) => {
-                // Identity in SSA representation
+
             }
             Part::MemCopy { size } => {
                 let size_ty = IntegerType::new(self.context, 64).into();
@@ -757,7 +757,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.emit_runtime_call(block, "iris_memset", 3, false)?;
             }
 
-            // --- Control Flow & Memory ---
+
             Part::ReturnInteger => {
                 let return_op = if let Some(val) = self.stack.pop() {
                     func::r#return(&[val], location)
@@ -838,7 +838,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 }
             }
 
-            
+
             Part::CreateArray { size, .. } => {
                 let size_ty = IntegerType::new(self.context, 64).into();
                 let size_attr = IntegerAttribute::new(size_ty, *size as i64);
@@ -886,7 +886,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.emit_runtime_call(block, "iris_allocate_slice", 3, true)?;
             }
 
-            
+
             Part::DefineStruct { name, size, align, .. } => {
                 let size_ty = IntegerType::new(self.context, 64).into();
                 let size_attr = IntegerAttribute::new(size_ty, *size as i64);
@@ -931,8 +931,8 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 for arg_part in args {
                     self.lower_part(block, arg_part)?;
                 }
-                let arg_count = self.stack.len() - prev_stack_len + 1; 
-                
+                let arg_count = self.stack.len() - prev_stack_len + 1;
+
                 let mangled_name = format!("{}__{}", struct_name, method_name);
                 self.emit_runtime_call(block, &mangled_name, arg_count, true)?;
             }
@@ -965,7 +965,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.push_value(res);
             }
 
-            
+
             Part::AtomicAdd(_) => {
                 self.emit_runtime_call(block, "iris_atomic_add", 2, true)?;
             }
@@ -985,7 +985,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.emit_runtime_call(block, "iris_yield_thread", 0, false)?;
             }
 
-            
+
             Part::CallWithCache { method, args } | Part::MegamorphicCall { method, args } => {
                 let prev_stack_len = self.stack.len();
                 for arg_part in args {
@@ -1001,7 +1001,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.emit_runtime_call(block, &format!("iris_ic_set_{}", prop), 2, false)?;
             }
 
-            
+
             Part::Throw => {
                 self.emit_runtime_call(block, "iris_throw_exception", 1, false)?;
             }
@@ -1012,7 +1012,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.emit_runtime_call(block, "iris_pop_try_frame", 0, false)?;
             }
 
-            
+
             Part::KernelLaunch { name, .. } => {
                 self.emit_runtime_call(block, &format!("iris_gpu_launch_{}", name), 0, false)?;
             }
@@ -1031,7 +1031,7 @@ impl<'c, 'a> MlirFunctionLowerer<'c, 'a> {
                 self.emit_runtime_call(block, &format!("iris_gpu_copy_from_{}", name), 1, false)?;
             }
 
-            
+
             Part::Label(_)
             | Part::Jump(_)
             | Part::JumpIfFalse(_)

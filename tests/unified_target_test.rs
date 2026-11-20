@@ -10,7 +10,7 @@ use iris::vm::value::Value;
 
 #[test]
 fn test_same_paper_on_vm_cpu_and_gpu() {
-    
+
     let paper = Paper::new("ComputeArithmetic", vec![
         Part::Integer(Size::S32, 25, false),
         Part::Integer(Size::S32, 17, false),
@@ -20,12 +20,12 @@ fn test_same_paper_on_vm_cpu_and_gpu() {
         Part::ReturnInteger,
     ]);
 
-    
+
     let mut vm = IrisEngine::new();
     let vm_res = paper.run_vm(&mut vm).expect("VM execution failed");
     assert_eq!(vm_res, Some(Value::I32(84)));
 
-    
+
     let context = Context::create();
     let module = context.create_module("compute_cpu");
     let rfc = RuntimeFunctionCompiler::new(&context, module);
@@ -38,12 +38,12 @@ fn test_same_paper_on_vm_cpu_and_gpu() {
     let cpu_res = paper.run_cpu(&rfc, &ee).expect("CPU execution failed");
     assert_eq!(cpu_res, Some(84));
 
-    
+
     let mut gpu = GpuDevice::new();
     let gpu_res = paper.run_gpu(&mut gpu).expect("GPU execution failed");
     assert_eq!(gpu_res.return_value, Some(Value::I32(84)));
 
-    
+
     let exec_vm = paper.execute(ExecutionTarget::Vm(&mut vm)).unwrap();
     let exec_cpu = paper.execute(ExecutionTarget::Cpu(&rfc, &ee)).unwrap();
     let exec_gpu = paper.execute(ExecutionTarget::Gpu(&mut gpu)).unwrap();
@@ -64,7 +64,7 @@ fn test_same_paper_on_vm_cpu_and_gpu() {
 
 #[test]
 fn test_struct_operations_across_targets() {
-    
+
     let paper = Paper::new("StructTest", vec![
         Part::AllocStackStruct("Point".to_string()),
         Part::Dup,
@@ -92,12 +92,12 @@ fn test_struct_operations_across_targets() {
         Part::ReturnInteger,
     ]);
 
-    
+
     let mut vm = IrisEngine::new();
     let vm_res = paper.run_vm(&mut vm).expect("VM struct execution failed");
     assert_eq!(vm_res, Some(Value::I32(250)));
 
-    
+
     let context = Context::create();
     let module = context.create_module("struct_cpu");
     let rfc = RuntimeFunctionCompiler::new(&context, module);
@@ -110,7 +110,7 @@ fn test_struct_operations_across_targets() {
     let cpu_res = paper.run_cpu(&rfc, &ee).expect("CPU struct execution failed");
     assert_eq!(cpu_res, Some(250));
 
-    
+
     let mut gpu = GpuDevice::new();
     let gpu_res = paper.run_gpu(&mut gpu).expect("GPU struct execution failed");
     assert_eq!(gpu_res.return_value, Some(Value::I32(250)));
@@ -139,7 +139,7 @@ fn test_gpu_kernel_launch_and_device_memory() {
     ]);
 
     let res = gpu.execute_paper(&kernel_paper).unwrap();
-    
+
     assert_eq!(res.total_threads_executed, 8);
 
     let read_back = gpu.copy_from_device("output_tensor").unwrap();
@@ -148,9 +148,8 @@ fn test_gpu_kernel_launch_and_device_memory() {
 
 #[test]
 fn test_same_kernel_paper_on_vm_cpu_and_gpu() {
-    
-    
-    
+
+
     let kernel_paper = Paper::new("UnifiedKernel", vec![
         Part::KernelLaunch {
             name: "DoubleThreadId".to_string(),
@@ -165,18 +164,18 @@ fn test_same_kernel_paper_on_vm_cpu_and_gpu() {
         },
     ]);
 
-    
+
     let mut gpu = GpuDevice::new();
     let gpu_res = kernel_paper.run_gpu(&mut gpu).expect("GPU kernel failed");
     assert_eq!(gpu_res.total_threads_executed, 8);
     assert_eq!(gpu_res.return_value, Some(Value::I32(14)));
 
-    
+
     let mut vm = IrisEngine::new();
     let vm_res = kernel_paper.run_vm(&mut vm).expect("VM kernel failed");
     assert_eq!(vm_res, Some(Value::I32(14)));
 
-    
+
     let context = Context::create();
     let module = context.create_module("kernel_cpu");
     let rfc = RuntimeFunctionCompiler::new(&context, module);
@@ -189,7 +188,7 @@ fn test_same_kernel_paper_on_vm_cpu_and_gpu() {
     let cpu_res = kernel_paper.run_cpu(&rfc, &ee).expect("CPU kernel failed");
     assert_eq!(cpu_res, Some(14));
 
-    
+
     let parallel_exec = kernel_paper.execute(ExecutionTarget::CpuParallel(&rfc, &ee)).unwrap();
     match parallel_exec {
         ExecutionResult::CpuParallel(par) => {
@@ -205,7 +204,7 @@ fn test_same_kernel_paper_on_vm_cpu_and_gpu() {
 
 #[test]
 fn test_cpu_multi_threaded_parallel_workgroups() {
-    
+
     let kernel = Paper::new("CpuParTest", vec![
         Part::PushLocal("global_id".to_string()),
         Part::Integer(Size::S32, 3, false),
@@ -224,7 +223,7 @@ fn test_cpu_multi_threaded_parallel_workgroups() {
         .expect("Failed to create JIT engine");
     rfc.setup_ee(&ee);
 
-    
+
     let result = kernel.run_cpu_parallel(&rfc, &ee, (4, 1, 1), (16, 1, 1)).expect("CPU parallel failed");
 
     assert_eq!(result.total_threads_executed, 64);
@@ -239,13 +238,13 @@ fn test_cpu_multi_threaded_parallel_workgroups() {
 
 #[test]
 fn test_fire_and_forget_spawn_detached() {
-    
+
     let _fn2 = Paper::new("BackgroundWorker", vec![
         Part::Integer(Size::S32, 100, false),
         Part::ReturnVoid,
     ]).registered();
 
-    
+
     let fn1 = Paper::new("MainController", vec![
         Part::SpawnDetached("BackgroundWorker".to_string()),
         Part::SpawnDetached("BackgroundWorker".to_string()),
@@ -253,13 +252,13 @@ fn test_fire_and_forget_spawn_detached() {
         Part::ReturnInteger,
     ]);
 
-    
+
     let mut vm = IrisEngine::new();
     let vm_res = fn1.run_vm(&mut vm).expect("VM execution failed");
-    
+
     assert_eq!(vm_res, Some(Value::I32(42)));
 
-    
+
     let context = Context::create();
     let module = context.create_module("spawn_detached_cpu");
     let rfc = RuntimeFunctionCompiler::new(&context, module);
@@ -281,12 +280,12 @@ fn test_paper_print_hi() {
         Part::ReturnVoid,
     ]);
 
-    
+
     let mut vm = IrisEngine::new();
     let vm_res = paper.run_vm(&mut vm);
     assert!(vm_res.is_ok());
 
-    
+
     let context = Context::create();
     let module = context.create_module("print_hi_cpu");
     let rfc = RuntimeFunctionCompiler::new(&context, module);
@@ -298,7 +297,7 @@ fn test_paper_print_hi() {
     let cpu_res = paper.run_cpu(&rfc, &ee);
     assert!(cpu_res.is_ok());
 
-    
+
     let mut gpu = GpuDevice::new();
     println!("GPU target detected hardware: {:?} (name: {:?})", gpu.is_hardware(), gpu.hardware_name());
     let gpu_res = paper.run_gpu(&mut gpu);

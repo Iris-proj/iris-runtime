@@ -108,7 +108,7 @@ impl IrisEngine {
     pub fn new() -> Self {
         Self {
             stack: Vec::new(),
-            frames: vec![], 
+            frames: vec![],
             globals: Vec::new(),
             try_frames: Vec::new(),
             global_id: 0,
@@ -335,7 +335,7 @@ impl IrisEngine {
                 if let Some(method_index) = obj.class.properties.get(name.as_ref()) {
                     self.handle_invoke_method(*method_index, arg_count)
                 } else {
-                    Err(EngineError::MethodNotFound(0)) 
+                    Err(EngineError::MethodNotFound(0))
                 }
             } else {
                 Err(EngineError::NonObjectValue)
@@ -346,7 +346,7 @@ impl IrisEngine {
     }
 
     fn handle_initialize_class(&mut self) -> Result<(), EngineError> {
-        
+
         Ok(())
     }
 
@@ -400,30 +400,30 @@ impl IrisEngine {
     }
 
     fn handle_bind_method_handle(&mut self) -> Result<(), EngineError> {
-        
-        
+
+
         Ok(())
     }
 
     fn handle_get_virtual_table(&mut self) -> Result<(), EngineError> {
-        
-        
+
+
         Err(EngineError::InvalidOperand("GetVirtualTable is not supported".to_string()))
     }
 
     fn handle_set_virtual_table(&mut self) -> Result<(), EngineError> {
-        
+
         Err(EngineError::InvalidOperand("SetVirtualTable is not supported".to_string()))
     }
 
     fn handle_allocate_object(&mut self) -> Result<(), EngineError> {
-        
-        
+
+
         Err(EngineError::InvalidOperand("AllocateObject is not supported, use CreateNewInstance".to_string()))
     }
 
     fn handle_free_object(&mut self) -> Result<(), EngineError> {
-        
+
         let _ = self.pop_stack()?;
         Ok(())
     }
@@ -466,17 +466,17 @@ impl IrisEngine {
     }
 
     fn handle_loop_start_marker(&mut self) -> Result<(), EngineError> {
-        
+
         Ok(())
     }
 
     fn handle_loop_end_marker(&mut self) -> Result<(), EngineError> {
-        
+
         Ok(())
     }
 
     fn handle_tail_call_function(&mut self) -> Result<(), EngineError> {
-        
+
         self.handle_call_function()
     }
 
@@ -1693,17 +1693,17 @@ impl IrisEngine {
     }
 
     fn handle_enter_monitor(&mut self) -> Result<(), EngineError> {
-        
+
         Ok(())
     }
 
     fn handle_exit_monitor(&mut self) -> Result<(), EngineError> {
-        
+
         Ok(())
     }
 
     fn handle_yield_current_thread(&mut self) -> Result<(), EngineError> {
-        
+
         std::thread::yield_now();
         Ok(())
     }
@@ -1741,7 +1741,7 @@ impl IrisEngine {
         let b = self.pop_stack()?;
         let a = self.pop_stack()?;
 
-        
+
         if let (Value::Str(s1), Value::Str(s2)) = (&a, &b) {
             let mut new_s = s1.to_string();
             new_s.push_str(s2);
@@ -2799,7 +2799,7 @@ impl IrisEngine {
                     return Ok(());
                 }
 
-                
+
                 OpCode::AllocStackStruct => self.handle_alloc_stack_struct()?,
                 OpCode::AllocStruct => self.handle_alloc_struct()?,
                 OpCode::GetStructField => self.handle_get_struct_field()?,
@@ -2812,13 +2812,13 @@ impl IrisEngine {
                 OpCode::StorePtr => self.handle_store_ptr()?,
                 OpCode::OffsetPtr => self.handle_offset_ptr()?,
 
-                
+
                 OpCode::KernelLaunch => self.handle_kernel_launch()?,
                 OpCode::DeviceMemoryAlloc => self.handle_device_memory_alloc()?,
                 OpCode::CopyToDevice => self.handle_copy_to_device()?,
                 OpCode::CopyFromDevice => self.handle_copy_from_device()?,
 
-                
+
                 OpCode::AddInt8 => self.handle_add_int8()?,
                 OpCode::AddInt16 => self.handle_add_int16()?,
                 OpCode::SubtractInt8 => self.handle_sub_int8()?,
@@ -2837,7 +2837,7 @@ impl IrisEngine {
     }
 
     pub fn execute_paper(&mut self, paper: &crate::builder::paper::Paper) -> Result<Option<Value>, EngineError> {
-        
+
         for part in &paper.parts {
             if let crate::builder::part::Part::KernelLaunch { grid_dim, block_dim, body, .. } = part {
                 let sub_paper = crate::builder::paper::Paper::new("VmKernel", body.clone());

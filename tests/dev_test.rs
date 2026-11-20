@@ -30,7 +30,7 @@ fn test_invoke_method() {
     let ee = rfc.module.create_jit_execution_engine(inkwell::OptimizationLevel::None).ok().unwrap();
 
     rfc.setup_ee(&ee);
-    
+
     {
         let compiled_print = rfc.jit_compile(paper, &ee);
 
@@ -100,10 +100,10 @@ fn test_struct_and_impl() {
 
     let paper = Paper::new("PointOperations", vec![
         point_struct,
-        
+
         Part::AllocStackStruct("Point".to_string()),
         Part::Dup,
-        
+
         Part::Integer(Size::S64, 10, false),
         Part::SetStructField {
             struct_name: "Point".to_string(),
@@ -111,7 +111,7 @@ fn test_struct_and_impl() {
             offset: 0,
             size: Size::S64,
         },
-        
+
         Part::Dup,
         Part::Integer(Size::S64, 20, false),
         Part::SetStructField {
@@ -120,7 +120,7 @@ fn test_struct_and_impl() {
             offset: 8,
             size: Size::S64,
         },
-        
+
         Part::CallMethod {
             struct_name: "Point".to_string(),
             method_name: "length".to_string(),

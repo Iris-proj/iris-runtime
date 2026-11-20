@@ -9,6 +9,198 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+#[allow(dead_code)]
+mod style {
+    use std::io::IsTerminal;
+
+    fn is_color_enabled() -> bool {
+        if std::env::var_os("NO_COLOR").is_some() {
+            return false;
+        }
+        if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
+            return false;
+        }
+        std::io::stdout().is_terminal()
+    }
+
+    pub fn bold(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[1m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn dim(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[2m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn cyan(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[36m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn bold_cyan(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[1;36m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn green(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[32m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn bold_green(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[1;32m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn yellow(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[33m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn bold_yellow(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[1;33m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn red(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[31m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn bold_red(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[1;31m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn magenta(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[35m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn bold_magenta(s: impl std::fmt::Display) -> String {
+        if is_color_enabled() {
+            format!("\x1b[1;35m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn colorize_help(text: &str) -> String {
+
+        let text = text.replace("--help, help", "-h, --help, help");
+        if !is_color_enabled() {
+            return text;
+        }
+
+        let mut out = String::with_capacity(text.len() + 512);
+        for line in text.lines() {
+            if line.starts_with("Usage: ") {
+                let rest = &line[7..];
+                out.push_str(&bold("Usage: "));
+                let mut first = true;
+                for part in rest.split_whitespace() {
+                    if !first {
+                        out.push(' ');
+                    }
+                    if first {
+                        out.push_str(&bold_cyan(part));
+                        first = false;
+                    } else if part.starts_with('-') {
+                        out.push_str(&yellow(part));
+                    } else if (part.starts_with('<') && part.ends_with('>'))
+                        || (part.contains('<') && part.contains('>'))
+                    {
+                        out.push_str(&cyan(part));
+                    } else if part.starts_with('[') || part.starts_with(']') {
+                        out.push_str(&dim(part));
+                    } else {
+                        out.push_str(&green(part));
+                    }
+                }
+                out.push('\n');
+            } else if line.starts_with("Required positional") {
+                out.push_str(&bold_red(line));
+                out.push('\n');
+            } else if line.ends_with(':') && !line.starts_with(' ') {
+                out.push_str(&bold_yellow(line));
+                out.push('\n');
+            } else if line.starts_with("  -") {
+                let trimmed = line.trim_start();
+                let indent = &line[..line.len() - trimmed.len()];
+                if let Some(idx) = trimmed.find("  ") {
+                    let flag_part = &trimmed[..idx];
+                    let desc = &trimmed[idx..];
+                    out.push_str(indent);
+                    out.push_str(&yellow(flag_part));
+                    out.push_str(&dim(desc));
+                } else {
+                    out.push_str(indent);
+                    out.push_str(&yellow(trimmed));
+                }
+                out.push('\n');
+            } else if line.starts_with("  ") && !line.starts_with("    ") {
+                let trimmed = line.trim_start();
+                let indent = &line[..line.len() - trimmed.len()];
+                if let Some(idx) = trimmed.find("  ") {
+                    let cmd_part = &trimmed[..idx];
+                    let desc = &trimmed[idx..];
+                    out.push_str(indent);
+                    out.push_str(&green(cmd_part));
+                    out.push_str(&dim(desc));
+                } else {
+                    out.push_str(line);
+                }
+                out.push('\n');
+            } else if line.starts_with("    ") && !line.trim().is_empty() {
+                out.push_str("    ");
+                out.push_str(&yellow(line.trim()));
+                out.push('\n');
+            } else if line.starts_with("Unrecognized") || line.starts_with("Error") {
+                out.push_str(&bold_red(line));
+                out.push('\n');
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+}
+
 #[derive(FromArgs, PartialEq, Eq, Debug)]
 #[argh(description = "Iris VM & Compiler CLI")]
 struct IrisCli {
@@ -232,6 +424,9 @@ struct BuildCmd {
     #[argh(option, description = "custom linker executable name or path")]
     linker: Option<String>,
 
+    #[argh(switch, description = "pure AOT compilation without VM engine structs, VM calls, or global mappings")]
+    pure: bool,
+
     #[argh(switch, short = 'q', description = "quiet mode, suppress progress logs")]
     quiet: bool,
 }
@@ -284,12 +479,18 @@ fn execute_build(cmd: BuildCmd) -> Result<(), Box<dyn std::error::Error>> {
     let context = inkwell::context::Context::create();
     let mut compiler = NativeCompiler::new(&context, &paper.name);
 
-    compiler.compile_paper(&paper)?;
-    compiler.emit_native_runtime()?;
-
     let native_format: NativeOutputFormat = cmd.emit.into();
-    if native_format == NativeOutputFormat::Executable || native_format == NativeOutputFormat::Object {
-        compiler.emit_main(&paper.name)?;
+    if cmd.pure {
+        compiler.compile_paper_pure(&paper)?;
+        if native_format == NativeOutputFormat::Executable || native_format == NativeOutputFormat::Object {
+            compiler.emit_main_pure(&paper.name)?;
+        }
+    } else {
+        compiler.compile_paper(&paper)?;
+        compiler.emit_native_runtime()?;
+        if native_format == NativeOutputFormat::Executable || native_format == NativeOutputFormat::Object {
+            compiler.emit_main(&paper.name)?;
+        }
     }
 
     let mut config = NativeBuildConfig::default();
@@ -298,6 +499,7 @@ fn execute_build(cmd: BuildCmd) -> Result<(), Box<dyn std::error::Error>> {
     config.cpu = cmd.cpu;
     config.features = cmd.features;
     config.linker = cmd.linker;
+    config.pure_aot = cmd.pure;
 
     if let Some(reloc) = cmd.reloc {
         config.reloc_mode = reloc.into();
@@ -308,15 +510,25 @@ fn execute_build(cmd: BuildCmd) -> Result<(), Box<dyn std::error::Error>> {
 
     if !cmd.quiet {
         println!(
-            "Building {:?} (format: {}, opt: {:?}) -> {:?}",
-            cmd.input, cmd.emit, cmd.opt, output_path
+            "{} {:?} ({} {}, {} {:?}) -> {}",
+            style::bold_cyan("Building"),
+            cmd.input,
+            style::dim("format:"),
+            style::yellow(cmd.emit),
+            style::dim("opt:"),
+            style::yellow(format!("{:?}", cmd.opt)),
+            style::bold_green(output_path.display())
         );
     }
 
     compiler.build(&output_path, native_format, &config)?;
 
     if !cmd.quiet {
-        println!("Successfully built: {:?}", output_path);
+        println!(
+            "{} {}",
+            style::bold_green("Successfully built:"),
+            style::bold(output_path.display())
+        );
     }
 
     Ok(())
@@ -333,7 +545,7 @@ fn execute_run(cmd: RunCmd) -> Result<(), Box<dyn std::error::Error>> {
         engine.push_frame(std::rc::Rc::new(func), 0)?;
         engine.run()?;
         if let Some(val) = engine.stack.pop() {
-            println!("Result: {val:?}");
+            println!("{} {val:?}", style::bold_green("Result:"));
         }
         return Ok(());
     }
@@ -350,13 +562,25 @@ fn execute_run(cmd: RunCmd) -> Result<(), Box<dyn std::error::Error>> {
                 print!("{stdout}");
             }
             if !cmd.quiet || code != 0 {
-                println!("Process exited with code: {code}");
+                if code == 0 {
+                    println!(
+                        "{} {}",
+                        style::dim("Process exited with code:"),
+                        style::green(code)
+                    );
+                } else {
+                    eprintln!(
+                        "{} {}",
+                        style::bold_red("Process exited with code:"),
+                        style::bold_red(code)
+                    );
+                }
             }
         }
         TargetKind::Vm => {
             let mut engine = IrisEngine::new();
             let res = paper.run_vm(&mut engine)?;
-            println!("VM Result: {res:?}");
+            println!("{} {res:?}", style::bold_cyan("VM Result:"));
         }
         TargetKind::Cpu => {
             let context = inkwell::context::Context::create();
@@ -368,40 +592,91 @@ fn execute_run(cmd: RunCmd) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("JIT Engine error: {e:?}"))?;
             rfc.setup_ee(&ee);
             let res = paper.run_cpu(&rfc, &ee)?;
-            println!("CPU JIT Result: {res:?}");
+            println!("{} {res:?}", style::bold_magenta("CPU JIT Result:"));
         }
         TargetKind::Gpu => {
             let mut gpu = iris::vm::gpu::GpuDevice::new();
             let res = paper.run_gpu(&mut gpu)?;
-            println!("GPU Result: {:?}", res.return_value);
+            println!("{} {:?}", style::bold_yellow("GPU Result:"), res.return_value);
         }
     }
 
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && (args[1] == "--version" || args[1] == "-V") {
-        println!("iris {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        println!("{} {}", style::bold_cyan("iris"), env!("CARGO_PKG_VERSION"));
+        return;
     }
 
-    let cli: IrisCli = argh::from_env();
+    let cmd_name = args.first().map(|s| s.as_str()).unwrap_or("iris");
+
+    let normalized_args: Vec<String> = args
+        .iter()
+        .skip(1)
+        .map(|arg| {
+            if arg == "-h" {
+                "--help".to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect();
+    let cmd_slices: Vec<&str> = normalized_args.iter().map(|s| s.as_str()).collect();
+
+    let cli = match IrisCli::from_args(&[cmd_name], &cmd_slices) {
+        Ok(cli) => cli,
+        Err(early_exit) => {
+            let colored = style::colorize_help(&early_exit.output);
+            if early_exit.status.is_ok() {
+                print!("{colored}");
+                std::process::exit(0);
+            } else {
+                eprint!("{colored}");
+                std::process::exit(1);
+            }
+        }
+    };
+
     if cli.version {
-        println!("iris {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        println!("{} {}", style::bold_cyan("iris"), env!("CARGO_PKG_VERSION"));
+        return;
     }
 
-    match cli.command {
+    let res = match cli.command {
         Some(Command::Build(build)) => execute_build(build),
         Some(Command::Run(run)) => execute_run(run),
         None => {
-            println!("Iris VM & Compiler v{}", env!("CARGO_PKG_VERSION"));
-            println!("Usage: iris <command> [<args>]\n");
-            println!("Commands:\n  build    compile Iris program to native targets\n  run      execute Iris program\n");
-            println!("Run 'iris --help' for full details.");
+            println!(
+                "{} v{}",
+                style::bold_cyan("Iris VM & Compiler"),
+                env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "{}: {} <command> [<args>]\n",
+                style::bold("Usage"),
+                style::cyan("iris")
+            );
+            println!(
+                "{}:\n  {}    {}\n  {}      {}\n",
+                style::bold("Commands"),
+                style::green("build"),
+                style::dim("compile Iris program to native targets"),
+                style::green("run"),
+                style::dim("execute Iris program")
+            );
+            println!(
+                "Run '{}' for full details.",
+                style::yellow("iris --help")
+            );
             Ok(())
         }
+    };
+
+    if let Err(err) = res {
+        eprintln!("{} {err}", style::bold_red("error:"));
+        std::process::exit(1);
     }
 }

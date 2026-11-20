@@ -40,7 +40,7 @@ impl VulkanContext {
             return None;
         }
 
-        
+
         let mut chosen = None;
         for &pdev in &pdevices {
             let props = unsafe { instance.get_physical_device_properties(pdev) };
@@ -176,11 +176,7 @@ impl VulkanContext {
                 .map_err(|e| format!("Vulkan create_shader_module error: {:?}", e))?
         };
 
-        
-        
-        
-        
-        
+
         let buffer_size = 4096 as vk::DeviceSize;
         let (out_buffer, out_memory) = self.create_buffer(
             buffer_size,
@@ -188,7 +184,7 @@ impl VulkanContext {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
 
-        
+
         unsafe {
             let data_ptr = self
                 .device
@@ -198,7 +194,7 @@ impl VulkanContext {
             self.device.unmap_memory(out_memory);
         }
 
-        
+
         let binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -213,7 +209,7 @@ impl VulkanContext {
                 .map_err(|e| format!("create_descriptor_set_layout error: {:?}", e))?
         };
 
-        
+
         let set_layouts = [desc_layout];
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         let pipeline_layout = unsafe {
@@ -222,7 +218,7 @@ impl VulkanContext {
                 .map_err(|e| format!("create_pipeline_layout error: {:?}", e))?
         };
 
-        
+
         let main_fn_name = b"main\0";
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -239,7 +235,7 @@ impl VulkanContext {
                 .map_err(|(_, e)| format!("create_compute_pipelines error: {:?}", e))?[0]
         };
 
-        
+
         let pool_size = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1);
@@ -279,7 +275,7 @@ impl VulkanContext {
             self.device.update_descriptor_sets(&[write_desc], &[]);
         }
 
-        
+
         let cmd_pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(self.queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -317,7 +313,7 @@ impl VulkanContext {
             self.device.end_command_buffer(cmd_buf).unwrap();
         }
 
-        
+
         let fence_info = vk::FenceCreateInfo::default();
         let fence = unsafe { self.device.create_fence(&fence_info, None).unwrap() };
 
@@ -328,7 +324,7 @@ impl VulkanContext {
             self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
         }
 
-        
+
         let total_threads = (grid_dim.0.max(1) * grid_dim.1.max(1) * grid_dim.2.max(1) * block_dim.0.max(1) * block_dim.1.max(1) * block_dim.2.max(1)) as usize;
         let mut ret_val = None;
         unsafe {
@@ -356,7 +352,7 @@ impl VulkanContext {
             self.device.unmap_memory(out_memory);
         }
 
-        
+
         unsafe {
             self.device.destroy_fence(fence, None);
             self.device.destroy_command_pool(cmd_pool, None);
@@ -454,7 +450,7 @@ fn generate_glsl(paper: &Paper, block_dim: (u32, u32, u32)) -> String {
     s.push_str("    int sp = 0;\n");
     s.push_str("    int struct_mem[32];\n\n");
 
-    
+
     let parts_to_emit = if let Some(Part::KernelLaunch { body, .. }) = paper.parts.iter().find(|p| matches!(p, Part::KernelLaunch { .. })) {
         body.as_slice()
     } else {
@@ -470,7 +466,7 @@ fn generate_glsl(paper: &Paper, block_dim: (u32, u32, u32)) -> String {
             }
             Part::Print => {
                 if let Some(ref str_val) = pending_string {
-                    
+
                     s.push_str("    if (global_id == 0) {\n");
                     s.push_str(&format!("        print_len = {}u;\n", str_val.len()));
                     for (i, byte) in str_val.bytes().enumerate() {
@@ -526,7 +522,7 @@ fn generate_glsl(paper: &Paper, block_dim: (u32, u32, u32)) -> String {
                 s.push_str("    return;\n");
             }
             Part::AllocStackStruct(_) | Part::AllocStruct(_) => {
-                s.push_str("    stack[sp++] = 0;\n"); 
+                s.push_str("    stack[sp++] = 0;\n");
             }
             Part::Dup => {
                 s.push_str("    if (sp > 0) { int top = stack[sp - 1]; stack[sp++] = top; }\n");

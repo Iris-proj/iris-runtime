@@ -17,7 +17,6 @@ pub struct GpuExecutionResult {
 }
 
 
-
 pub struct GpuDevice {
     pub device_memory: HashMap<String, Vec<u8>>,
     pub max_threads_per_block: u32,
@@ -66,12 +65,12 @@ impl GpuDevice {
         self.vulkan.as_ref().map(|v| v.device_name.as_str())
     }
 
-    /// Allocates an uninitialized VRAM buffer of `size_bytes` on the accelerator.
+
     pub fn device_alloc(&mut self, name: impl Into<String>, size_bytes: usize) {
         self.device_memory.insert(name.into(), vec![0u8; size_bytes]);
     }
 
-    /// Copies data from host RAM to GPU device memory.
+
     pub fn copy_to_device(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
         let buf = self
             .device_memory
@@ -84,7 +83,7 @@ impl GpuDevice {
         Ok(())
     }
 
-    /// Copies data from GPU device memory back to host RAM.
+
     pub fn copy_from_device(&self, name: &str) -> Result<Vec<u8>, String> {
         self.device_memory
             .get(name)
@@ -92,7 +91,7 @@ impl GpuDevice {
             .ok_or_else(|| format!("GPU device memory '{}' not found", name))
     }
 
-    /// Dispatches a compute kernel or standard Paper to run across a grid of parallel threads.
+
     pub fn launch_kernel(
         &mut self,
         paper: &Paper,
@@ -105,7 +104,7 @@ impl GpuDevice {
 
         let mut last_return: Option<Value> = None;
 
-        // Execute parallel thread iterations
+
         for block_idx in 0..total_blocks {
             for thread_idx in 0..threads_per_block {
                 let global_thread_id = block_idx * threads_per_block + thread_idx;
@@ -131,9 +130,9 @@ impl GpuDevice {
         })
     }
 
-    /// Executes the Paper directly on the GPU accelerator.
+
     pub fn execute_paper(&mut self, paper: &Paper) -> Result<GpuExecutionResult, String> {
-        // First try to execute on physical Vulkan GPU hardware if available
+
         if let Some(ref mut vk) = self.vulkan {
             let mut grid = (1, 1, 1);
             let mut block = (1, 1, 1);
@@ -149,7 +148,7 @@ impl GpuDevice {
             }
         }
 
-        // If the paper contains explicit KernelLaunch instructions, execute them on software simulator
+
         let mut launched = false;
         let mut last_res = GpuExecutionResult {
             return_value: None,
@@ -164,7 +163,7 @@ impl GpuDevice {
                     self.device_alloc(name.clone(), *size as usize);
                 }
                 Part::CopyToDevice(name) => {
-                    // Marker in Paper body
+
                     let _ = self.device_memory.contains_key(name);
                 }
                 Part::CopyFromDevice(name) => {
@@ -185,14 +184,14 @@ impl GpuDevice {
         }
 
         if !launched {
-            // Run the general paper with a single default workgroup
+
             last_res = self.launch_kernel(paper, (1, 1, 1), (1, 1, 1))?;
         }
 
         Ok(last_res)
     }
 
-    /// Evaluates a thread's execution of Paper parts within the GPU device context.
+
     fn execute_single_thread(
         &mut self,
         parts: &[Part],
@@ -205,7 +204,7 @@ impl GpuDevice {
         let mut stack: Vec<Value> = Vec::new();
         let mut locals: HashMap<String, Value> = HashMap::new();
 
-        
+
         locals.insert("global_id".to_string(), Value::I64(global_thread_id as i64));
         locals.insert("thread_idx".to_string(), Value::I64(thread_idx as i64));
         locals.insert("block_idx".to_string(), Value::I64(block_idx as i64));
@@ -213,7 +212,7 @@ impl GpuDevice {
         let mut ip = 0;
         let mut labels: HashMap<String, usize> = HashMap::new();
 
-        
+
         for (idx, part) in parts.iter().enumerate() {
             if let Part::Label(name) = part {
                 labels.insert(name.clone(), idx);
@@ -524,7 +523,7 @@ impl GpuDevice {
                         }
                     }
                 }
-                
+
                 Part::AllocStackStruct(_name) | Part::AllocStruct(_name) => {
                     stack.push(Value::RawMemory(Rc::new(RefCell::new(vec![0u8; 64]))));
                 }

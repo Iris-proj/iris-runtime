@@ -12,15 +12,15 @@ use crate::builder::paper::Paper;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeOutputFormat {
-    
+
     Executable,
-    
+
     Object,
-    
+
     Assembly,
-    
+
     Bitcode,
-    
+
     LlvmIr,
 }
 
@@ -36,6 +36,9 @@ pub struct NativeBuildConfig {
     pub emit_main: bool,
     pub linker: Option<String>,
     pub linker_args: Vec<String>,
+
+
+    pub pure_aot: bool,
 }
 
 impl Default for NativeBuildConfig {
@@ -50,6 +53,7 @@ impl Default for NativeBuildConfig {
             emit_main: true,
             linker: None,
             linker_args: Vec::new(),
+            pure_aot: false,
         }
     }
 }
@@ -82,14 +86,19 @@ impl<'ctx> NativeCompiler<'ctx> {
         &self.rfc.module
     }
 
-    
+
     pub fn compile_paper(&mut self, paper: &Paper) -> Result<FunctionValue<'ctx>, String> {
         self.rfc.compile_paper_function(paper)
             .ok_or_else(|| format!("Failed to compile Paper '{}' to native LLVM IR", paper.name))
     }
 
-    /// Emits native runtime functions (printf/puts, iris_push_i32, iris_push_i64, iris_push_str, iris_print_logic, etc.)
-    /// directly into the LLVM module so the resulting object file is completely self-contained.
+
+    pub fn compile_paper_pure(&mut self, paper: &Paper) -> Result<FunctionValue<'ctx>, String> {
+        self.rfc.compile_paper_function_pure(paper)
+            .ok_or_else(|| format!("Failed to compile Paper '{}' to pure native LLVM IR", paper.name))
+    }
+
+
     pub fn emit_native_runtime(&self) -> Result<(), String> {
         let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
@@ -100,21 +109,21 @@ impl<'ctx> NativeCompiler<'ctx> {
         let stack_array_type = i64_type.array_type(2048);
         let types_array_type = i8_type.array_type(2048);
         let engine_struct_type = self.context.struct_type(&[
-            stack_array_type.into(), // 0: stack
-            types_array_type.into(), // 1: is_string
-            i64_type.into(),         // 2: stack_top
-            i64_type.into(),         // 3: global_id
-            i64_type.into(),         // 4: thread_idx
-            i64_type.into(),         // 5: block_idx
+            stack_array_type.into(),
+            types_array_type.into(),
+            i64_type.into(),
+            i64_type.into(),
+            i64_type.into(),
+            i64_type.into(),
         ], false);
 
-        // Standard libc declarations
+
         let puts_fn = self.rfc.module.get_function("puts")
             .unwrap_or_else(|| self.rfc.module.add_function("puts", i32_type.fn_type(&[ptr_type.into()], false), None));
         let printf_fn = self.rfc.module.get_function("printf")
             .unwrap_or_else(|| self.rfc.module.add_function("printf", i32_type.fn_type(&[ptr_type.into()], true), None));
 
-        // iris_push_i32(engine: ptr, val: i32)
+
         if let Some(push_i32_fn) = self.rfc.module.get_function("iris_push_i32") {
             if push_i32_fn.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(push_i32_fn, "entry");
@@ -139,7 +148,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_push_i64(engine: ptr, val: i64)
+
         if let Some(push_i64_fn) = self.rfc.module.get_function("iris_push_i64") {
             if push_i64_fn.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(push_i64_fn, "entry");
@@ -163,7 +172,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_push_str(engine: ptr, str_ptr: ptr, len: i64)
+
         if let Some(push_str_fn) = self.rfc.module.get_function("iris_push_str") {
             if push_str_fn.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(push_str_fn, "entry");
@@ -188,7 +197,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_print_logic(engine: ptr) -> i8
+
         if let Some(print_fn) = self.rfc.module.get_function("iris_print_logic") {
             if print_fn.count_basic_blocks() == 0 {
                 let entry_bb = self.context.append_basic_block(print_fn, "entry");
@@ -219,13 +228,13 @@ impl<'ctx> NativeCompiler<'ctx> {
                 let is_str = builder.build_int_compare(inkwell::IntPredicate::EQ, ty, i8_type.const_int(1, false), "is_str").unwrap();
                 builder.build_conditional_branch(is_str, print_str_bb, print_num_bb).unwrap();
 
-                // Print string
+
                 builder.position_at_end(print_str_bb);
                 let s_ptr = builder.build_int_to_ptr(val, ptr_type, "s_ptr").unwrap();
                 builder.build_call(puts_fn, &[s_ptr.into()], "puts_call").unwrap();
                 builder.build_unconditional_branch(end_bb).unwrap();
 
-                // Print number
+
                 builder.position_at_end(print_num_bb);
                 let fmt = builder.build_global_string_ptr("%ld\n", "fmt_i64").unwrap();
                 builder.build_call(printf_fn, &[fmt.as_pointer_value().into(), val.into()], "printf_call").unwrap();
@@ -236,7 +245,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_get_global_id(engine: ptr) -> i64
+
         if let Some(fn_val) = self.rfc.module.get_function("iris_get_global_id") {
             if fn_val.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(fn_val, "entry");
@@ -249,7 +258,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_get_thread_idx(engine: ptr) -> i64
+
         if let Some(fn_val) = self.rfc.module.get_function("iris_get_thread_idx") {
             if fn_val.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(fn_val, "entry");
@@ -262,7 +271,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_get_block_idx(engine: ptr) -> i64
+
         if let Some(fn_val) = self.rfc.module.get_function("iris_get_block_idx") {
             if fn_val.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(fn_val, "entry");
@@ -275,7 +284,7 @@ impl<'ctx> NativeCompiler<'ctx> {
             }
         }
 
-        // iris_spawn_detached(name_ptr: ptr, len: i64) -> void
+
         if let Some(fn_val) = self.rfc.module.get_function("iris_spawn_detached") {
             if fn_val.count_basic_blocks() == 0 {
                 let bb = self.context.append_basic_block(fn_val, "entry");
@@ -288,8 +297,7 @@ impl<'ctx> NativeCompiler<'ctx> {
         Ok(())
     }
 
-    /// Emits standard `int main(int argc, char** argv)` that initializes the Iris native engine,
-    /// runs the entry Paper function, and returns the top value of the stack (if any) as the process exit code.
+
     pub fn emit_main(&self, entry_func_name: &str) -> Result<FunctionValue<'ctx>, String> {
         let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
@@ -325,7 +333,7 @@ impl<'ctx> NativeCompiler<'ctx> {
 
         let eng_alloca = builder.build_alloca(engine_struct_type, "native_engine").unwrap();
 
-        
+
         let top_ptr = unsafe { builder.build_gep(engine_struct_type, eng_alloca, &[i32_type.const_int(0, false), i32_type.const_int(2, false)], "top_ptr").unwrap() };
         builder.build_store(top_ptr, i64_type.const_int(0, false)).unwrap();
         let gid_ptr = unsafe { builder.build_gep(engine_struct_type, eng_alloca, &[i32_type.const_int(0, false), i32_type.const_int(3, false)], "gid_ptr").unwrap() };
@@ -335,10 +343,10 @@ impl<'ctx> NativeCompiler<'ctx> {
         let bid_ptr = unsafe { builder.build_gep(engine_struct_type, eng_alloca, &[i32_type.const_int(0, false), i32_type.const_int(5, false)], "bid_ptr").unwrap() };
         builder.build_store(bid_ptr, i64_type.const_int(0, false)).unwrap();
 
-        
+
         builder.build_call(entry_func, &[eng_alloca.into()], "call_entry").unwrap();
 
-        
+
         let top = builder.build_load(i64_type, top_ptr, "top").unwrap().into_int_value();
         let has_return = builder.build_int_compare(inkwell::IntPredicate::SGT, top, i64_type.const_int(0, false), "has_ret").unwrap();
 
@@ -346,7 +354,7 @@ impl<'ctx> NativeCompiler<'ctx> {
         let ret_zero_bb = self.context.append_basic_block(main_fn, "ret_zero");
         builder.build_conditional_branch(has_return, ret_val_bb, ret_zero_bb).unwrap();
 
-        
+
         builder.position_at_end(ret_val_bb);
         let last_idx = builder.build_int_sub(top, i64_type.const_int(1, false), "last_idx").unwrap();
         let stack_elem_ptr = unsafe { builder.build_gep(engine_struct_type, eng_alloca, &[i32_type.const_int(0, false), i32_type.const_int(0, false), last_idx], "last_elem").unwrap() };
@@ -354,14 +362,52 @@ impl<'ctx> NativeCompiler<'ctx> {
         let ret_i32 = builder.build_int_truncate(ret_val, i32_type, "ret_i32").unwrap();
         builder.build_return(Some(&ret_i32)).unwrap();
 
-        
+
         builder.position_at_end(ret_zero_bb);
         builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
 
         Ok(main_fn)
     }
 
-    
+
+    pub fn emit_main_pure(&self, entry_func_name: &str) -> Result<FunctionValue<'ctx>, String> {
+        let i32_type = self.context.i32_type();
+
+        let main_fn = if let Some(existing) = self.rfc.module.get_function("main") {
+            if existing.count_basic_blocks() > 0 {
+                return Ok(existing);
+            }
+            existing
+        } else {
+            let main_type = i32_type.fn_type(&[], false);
+            self.rfc.module.add_function("main", main_type, None)
+        };
+
+        let entry_func = self.rfc.module.get_function(entry_func_name)
+            .ok_or_else(|| format!("Entry function '{}' not found in module", entry_func_name))?;
+
+        let bb = self.context.append_basic_block(main_fn, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(bb);
+
+        let call_res = builder.build_call(entry_func, &[], "call_entry").unwrap();
+        let ret_val = match call_res.try_as_basic_value() {
+            inkwell::values::ValueKind::Basic(val) => {
+                let iv = val.into_int_value();
+                if iv.get_type() == i32_type {
+                    iv
+                } else {
+                    builder.build_int_truncate(iv, i32_type, "ret_trunc").unwrap()
+                }
+            }
+            _ => i32_type.const_int(0, false),
+        };
+
+        builder.build_return(Some(&ret_val)).unwrap();
+        Ok(main_fn)
+    }
+
+
     pub fn create_target_machine(&self, config: &NativeBuildConfig) -> Result<TargetMachine, String> {
         Target::initialize_all(&InitializationConfig::default());
         let triple = if let Some(ref t) = config.target_triple {
@@ -394,21 +440,21 @@ impl<'ctx> NativeCompiler<'ctx> {
         ).ok_or_else(|| "Failed to create LLVM TargetMachine".to_string())
     }
 
-    
+
     pub fn emit_object_file(&self, output_path: &Path, config: &NativeBuildConfig) -> Result<(), String> {
         let tm = self.create_target_machine(config)?;
         tm.write_to_file(&self.rfc.module, FileType::Object, output_path)
             .map_err(|e| format!("Failed to write object file: {:?}", e))
     }
 
-    
+
     pub fn emit_assembly(&self, output_path: &Path, config: &NativeBuildConfig) -> Result<(), String> {
         let tm = self.create_target_machine(config)?;
         tm.write_to_file(&self.rfc.module, FileType::Assembly, output_path)
             .map_err(|e| format!("Failed to write assembly file: {:?}", e))
     }
 
-    
+
     pub fn emit_bitcode(&self, output_path: &Path) -> Result<(), String> {
         if self.rfc.module.write_bitcode_to_path(output_path) {
             Ok(())
@@ -417,13 +463,13 @@ impl<'ctx> NativeCompiler<'ctx> {
         }
     }
 
-    
+
     pub fn emit_llvm_ir(&self, output_path: &Path) -> Result<(), String> {
         self.rfc.module.print_to_file(output_path)
             .map_err(|e| format!("Failed to write LLVM IR: {:?}", e))
     }
 
-    
+
     pub fn build_executable(&self, output_path: &Path, config: &NativeBuildConfig) -> Result<(), String> {
         let obj_path = output_path.with_extension("tmp.o");
         self.emit_object_file(&obj_path, config)?;
@@ -452,7 +498,7 @@ impl<'ctx> NativeCompiler<'ctx> {
         Ok(())
     }
 
-    
+
     pub fn build(&self, output_path: &Path, format: NativeOutputFormat, config: &NativeBuildConfig) -> Result<(), String> {
         match format {
             NativeOutputFormat::Executable => self.build_executable(output_path, config),
@@ -463,6 +509,5 @@ impl<'ctx> NativeCompiler<'ctx> {
         }
     }
 }
-
 
 

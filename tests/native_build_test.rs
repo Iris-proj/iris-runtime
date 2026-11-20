@@ -6,7 +6,7 @@ use iris::builder::part::{Part, Size, IntegerCalculateType, IntegerComparisonTyp
 
 #[test]
 fn test_build_native_executable_arithmetic() {
-    
+
     let paper = Paper::new("NativeArithmetic", vec![
         Part::Integer(Size::S32, 25, false),
         Part::Integer(Size::S32, 17, false),
@@ -22,9 +22,40 @@ fn test_build_native_executable_arithmetic() {
 
     assert!(bin_path.exists(), "Binary file does not exist");
 
-    
+
     let output = Command::new(bin_path).output().expect("Failed to execute native binary");
     assert_eq!(output.status.code(), Some(84));
+
+    let _ = std::fs::remove_file(bin_path);
+}
+
+#[test]
+fn test_build_pure_native_executable() {
+    let paper = Paper::new("PureNativeMath", vec![
+        Part::Integer(Size::S32, 25, false),
+        Part::Integer(Size::S32, 17, false),
+        Part::CalculateInteger(Size::S32, IntegerCalculateType::Add),
+        Part::Integer(Size::S32, 2, false),
+        Part::CalculateInteger(Size::S32, IntegerCalculateType::Mul),
+        Part::ReturnInteger,
+    ]);
+
+    let bin_path = Path::new("target/pure_native_arithmetic_bin");
+    paper.build_native_executable_pure(bin_path, OptimizationLevel::Aggressive)
+        .expect("Failed to build pure native executable");
+
+    assert!(bin_path.exists(), "Binary file does not exist");
+
+    let output = Command::new(bin_path).output().expect("Failed to execute native binary");
+    assert_eq!(output.status.code(), Some(84));
+
+
+    let nm_output = Command::new("nm").arg(bin_path).output();
+    if let Ok(nm) = nm_output {
+        let syms = String::from_utf8_lossy(&nm.stdout);
+        assert!(!syms.contains("iris_push_i32"), "Must not contain VM runtime calls");
+        assert!(!syms.contains("iris_print_logic"), "Must not contain VM runtime calls");
+    }
 
     let _ = std::fs::remove_file(bin_path);
 }
@@ -67,29 +98,29 @@ fn test_build_native_all_formats() {
     let ll_path = Path::new("target/formats_test.ll");
     let bin_path = Path::new("target/formats_test_bin");
 
-    
+
     paper.build_native_object(obj_path, OptimizationLevel::Aggressive).expect("Emit object failed");
     assert!(obj_path.exists());
     assert!(std::fs::metadata(obj_path).unwrap().len() > 0);
 
-    
+
     paper.build_native_assembly(asm_path, OptimizationLevel::Aggressive).expect("Emit assembly failed");
     assert!(asm_path.exists());
     let asm_content = std::fs::read_to_string(asm_path).unwrap();
     assert!(!asm_content.is_empty());
 
-    
+
     paper.build_native_bitcode(bc_path).expect("Emit bitcode failed");
     assert!(bc_path.exists());
     assert!(std::fs::metadata(bc_path).unwrap().len() > 0);
 
-    
+
     paper.build_native_ir(ll_path).expect("Emit LLVM IR failed");
     assert!(ll_path.exists());
     let ll_content = std::fs::read_to_string(ll_path).unwrap();
     assert!(ll_content.contains("FormatsTest"));
 
-    
+
     let status = Command::new("cc")
         .arg(obj_path)
         .arg("-o")
@@ -98,11 +129,11 @@ fn test_build_native_all_formats() {
         .expect("Failed to link object file");
     assert!(status.success());
 
-    
-    let output = Command::new(bin_path).output().expect("Failed to run binary");
-    assert_eq!(output.status.code(), Some(77)); 
 
-    
+    let output = Command::new(bin_path).output().expect("Failed to run binary");
+    assert_eq!(output.status.code(), Some(77));
+
+
     let _ = std::fs::remove_file(obj_path);
     let _ = std::fs::remove_file(asm_path);
     let _ = std::fs::remove_file(bc_path);
@@ -112,21 +143,14 @@ fn test_build_native_all_formats() {
 
 #[test]
 fn test_loop_and_locals_in_native_binary() {
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
+
     let paper = Paper::new("NativeLoop", vec![
-        
+
         Part::Integer(Size::S64, 0, false),
         Part::StoreLocal("sum".to_string()),
 
-        
+
         Part::Integer(Size::S64, 1, false),
         Part::StoreLocal("i".to_string()),
 
@@ -136,13 +160,13 @@ fn test_loop_and_locals_in_native_binary() {
         Part::ComparisonInteger(IntegerComparisonType::Greater, false, false),
         Part::JumpIfTrue("end".to_string()),
 
-        
+
         Part::PushLocal("sum".to_string()),
         Part::PushLocal("i".to_string()),
         Part::CalculateInteger(Size::S64, IntegerCalculateType::Add),
         Part::StoreLocal("sum".to_string()),
 
-        
+
         Part::PushLocal("i".to_string()),
         Part::Integer(Size::S64, 1, false),
         Part::CalculateInteger(Size::S64, IntegerCalculateType::Add),
@@ -239,7 +263,7 @@ fn test_cli_build_and_run_native() {
 
     paper.save_binary(paper_file).expect("Failed to save paper");
 
-    
+
     let build_status = Command::new("cargo")
         .args(&["run", "--bin", "iris", "--", "build", paper_file.to_str().unwrap(), "-o", bin_file.to_str().unwrap(), "-O", "3"])
         .status()
@@ -247,7 +271,7 @@ fn test_cli_build_and_run_native() {
     assert!(build_status.success());
     assert!(bin_file.exists());
 
-    
+
     let output = Command::new(bin_file).output().expect("Failed to execute CLI built binary");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim(), "Iris CLI built native binary successfully!");

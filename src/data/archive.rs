@@ -31,8 +31,8 @@ pub fn load_archive(archive_path: &str) -> Result<Vec<Function>, Box<dyn std::er
         let mut file = archive.by_index(i)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
-        
-        
+
+
         let temp_path = format!("temp_{}", file.name());
         let mut temp_file = File::create(&temp_path)?;
         temp_file.write_all(&buffer)?;
@@ -40,7 +40,7 @@ pub fn load_archive(archive_path: &str) -> Result<Vec<Function>, Box<dyn std::er
         let function = load_function(&temp_path)?;
         functions.push(function);
 
-        
+
         std::fs::remove_file(&temp_path)?;
     }
 

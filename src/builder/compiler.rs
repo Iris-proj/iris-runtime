@@ -17,7 +17,7 @@ pub type Func = unsafe extern "C" fn(iris_engine: *mut IrisEngine);
 pub struct RuntimeFunctionCompiler<'ctx> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
-    
+
     vm_type: PointerType<'ctx>,
     function_type: FunctionType<'ctx>,
     null_type: VoidType<'ctx>,
@@ -133,6 +133,20 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
             self.module.add_function(paper.name.as_str(), self.function_type, None)
         };
         let basic_block = self.context.append_basic_block(function, "entry");
+
+
+        let entry_builder = self.context.create_builder();
+        entry_builder.position_at_end(basic_block);
+        for part in &paper.parts {
+            match part {
+                Part::PushLocal(name) | Part::StoreLocal(name) => {
+                    locals_map.entry(name.clone()).or_insert_with(|| {
+                        entry_builder.build_alloca(self.i64_type, name).unwrap()
+                    });
+                }
+                _ => {}
+            }
+        }
 
         let mut label_blocks: std::collections::HashMap<String, inkwell::basic_block::BasicBlock<'ctx>> = std::collections::HashMap::new();
         for part in &paper.parts {
@@ -673,6 +687,444 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
         Some(function)
     }
 
+
+    pub fn compile_paper_function_pure(
+        &self,
+        paper: &Paper,
+    ) -> Option<FunctionValue<'ctx>> {
+        let mut int_values: Vec<IntValue> = vec![];
+        let mut float_values: Vec<FloatValue> = vec![];
+        let mut locals_map: std::collections::HashMap<String, inkwell::values::PointerValue<'ctx>> = std::collections::HashMap::new();
+
+
+        let pure_fn_type = self.i64_type.fn_type(&[], false);
+        let function = if let Some(existing) = self.module.get_function(paper.name.as_str()) {
+            if existing.count_basic_blocks() > 0 {
+                return Some(existing);
+            }
+            existing
+        } else {
+            self.module.add_function(paper.name.as_str(), pure_fn_type, None)
+        };
+        let basic_block = self.context.append_basic_block(function, "entry");
+
+
+        let entry_builder = self.context.create_builder();
+        entry_builder.position_at_end(basic_block);
+        for part in &paper.parts {
+            match part {
+                Part::PushLocal(name) | Part::StoreLocal(name) => {
+                    locals_map.entry(name.clone()).or_insert_with(|| {
+                        entry_builder.build_alloca(self.i64_type, name).unwrap()
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let mut label_blocks: std::collections::HashMap<String, inkwell::basic_block::BasicBlock<'ctx>> = std::collections::HashMap::new();
+        for part in &paper.parts {
+            if let Part::Label(name) = part {
+                if !label_blocks.contains_key(name) {
+                    let bb = self.context.append_basic_block(function, name.as_str());
+                    label_blocks.insert(name.clone(), bb);
+                }
+            }
+        }
+
+        let builder = self.context.create_builder();
+        builder.position_at_end(basic_block);
+
+        let ptr_type = self.context.ptr_type(AddressSpace::from(0));
+        let puts_fn = self.module.get_function("puts")
+            .unwrap_or_else(|| self.module.add_function("puts", self.i32_type.fn_type(&[ptr_type.into()], false), None));
+        let printf_fn = self.module.get_function("printf")
+            .unwrap_or_else(|| self.module.add_function("printf", self.i32_type.fn_type(&[ptr_type.into()], true), None));
+
+        for part in paper.parts.clone() {
+            match part {
+                Part::Print => {
+                    if let Some(val) = int_values.pop() {
+                        let fmt = builder.build_global_string_ptr("%ld\n", "fmt_i64").unwrap();
+                        let val_i64 = if val.get_type() == self.i64_type {
+                            val
+                        } else {
+                            builder.build_int_s_extend(val, self.i64_type, "ext_i64").unwrap()
+                        };
+                        let _ = builder.build_call(printf_fn, &[fmt.as_pointer_value().into(), val_i64.into()], "printf_call");
+                    }
+                },
+                Part::String(s) => {
+                    let str_val = builder.build_global_string_ptr(&s, "str_lit").unwrap();
+                    let _ = builder.build_call(puts_fn, &[str_val.as_pointer_value().into()], "puts_call");
+                },
+                Part::Integer(size, value, unsigned) => {
+                    match size {
+                        Size::S8 => int_values.push(self.i8_type.const_int(value, unsigned)),
+                        Size::S16 => int_values.push(self.i16_type.const_int(value, unsigned)),
+                        Size::S32 => int_values.push(self.i32_type.const_int(value, unsigned)),
+                        Size::S64 => int_values.push(self.i64_type.const_int(value, unsigned)),
+                        Size::S128 => int_values.push(self.i128_type.const_int(value, unsigned)),
+                    }
+                },
+                Part::CalculateInteger(_size, mode) => {
+                    let rhs = int_values.pop().unwrap();
+                    let lhs = int_values.pop().unwrap();
+                    match mode {
+                        IntegerCalculateType::Add => int_values.push(builder.build_int_add(lhs, rhs, "add_tmp").unwrap()),
+                        IntegerCalculateType::Sub => int_values.push(builder.build_int_sub(lhs, rhs, "sub_tmp").unwrap()),
+                        IntegerCalculateType::Mul => int_values.push(builder.build_int_mul(lhs, rhs, "mul_tmp").unwrap()),
+                        IntegerCalculateType::Div(unsigned) => {
+                            if unsigned {
+                                int_values.push(builder.build_int_unsigned_div(lhs, rhs, "div_tmp").unwrap())
+                            } else {
+                                int_values.push(builder.build_int_signed_div(lhs, rhs, "div_tmp").unwrap())
+                            }
+                        },
+                        IntegerCalculateType::Rem(unsigned) => {
+                            if unsigned {
+                                int_values.push(builder.build_int_unsigned_rem(lhs, rhs, "rem_tmp").unwrap())
+                            } else {
+                                int_values.push(builder.build_int_signed_rem(lhs, rhs, "rem_tmp").unwrap())
+                            }
+                        }
+                    }
+                },
+                Part::ComparisonInteger(mode, unsigned, _size) => {
+                    let rhs = int_values.pop().unwrap();
+                    let lhs = int_values.pop().unwrap();
+                    match mode {
+                        IntegerComparisonType::Equal => {
+                            int_values.push(builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq_tmp").unwrap());
+                        },
+                        IntegerComparisonType::NotEqual => {
+                            int_values.push(builder.build_int_compare(IntPredicate::NE, lhs, rhs, "ne_tmp").unwrap());
+                        },
+                        IntegerComparisonType::Greater => {
+                            int_values.push(builder.build_int_compare(if unsigned {IntPredicate::UGT} else {IntPredicate::SGT}, lhs, rhs, "g_tmp").unwrap());
+                        },
+                        IntegerComparisonType::GreaterEqual => {
+                            int_values.push(builder.build_int_compare(if unsigned {IntPredicate::UGE} else {IntPredicate::SGE}, lhs, rhs, "ge_tmp").unwrap());
+                        },
+                        IntegerComparisonType::Less => {
+                            int_values.push(builder.build_int_compare(if unsigned {IntPredicate::ULT} else {IntPredicate::SLT}, lhs, rhs, "l_tmp").unwrap());
+                        },
+                        IntegerComparisonType::LessEqual => {
+                            int_values.push(builder.build_int_compare(if unsigned {IntPredicate::ULE} else {IntPredicate::SLE}, lhs, rhs, "le_tmp").unwrap());
+                        }
+                    }
+                },
+                Part::ResizeInteger(current_size, to_size, z_or_s) => {
+                    let value = int_values.pop().unwrap();
+                    fn size_to_type<'a>(size: Size, rfc: &RuntimeFunctionCompiler<'a>) -> IntType<'a> {
+                        match size {
+                            Size::S8 => rfc.i8_type,
+                            Size::S16 => rfc.i16_type,
+                            Size::S32 => rfc.i32_type,
+                            Size::S64 => rfc.i64_type,
+                            Size::S128 => rfc.i128_type,
+                        }
+                    }
+                    let to_type = size_to_type(to_size, self);
+                    if current_size < to_size {
+                        if z_or_s {
+                            int_values.push(builder.build_int_z_extend(value, to_type, "tmp_rsz").unwrap())
+                        } else {
+                            int_values.push(builder.build_int_s_extend(value, to_type, "tmp_rsz").unwrap())
+                        }
+                    } else if current_size > to_size {
+                        int_values.push(builder.build_int_truncate(value, to_type, "tmp_rsz").unwrap())
+                    } else {
+                        int_values.push(value);
+                    }
+                },
+                Part::IntegerToDecimal(unsigned, mode) => {
+                    let value = int_values.pop().unwrap();
+                    let float_type = match mode { Size::S32 => self.f32_type, Size::S64 => self.f64_type, _ => unreachable!() };
+                    float_values.push(
+                        if unsigned { builder.build_unsigned_int_to_float(value, float_type, "tmp_i2f").unwrap() }
+                        else { builder.build_signed_int_to_float(value, float_type, "tmp_i2f").unwrap() }
+                    );
+                },
+                Part::ReturnInteger => {
+                    if let Some(val) = int_values.pop() {
+                        let ret_val = if val.get_type() == self.i64_type {
+                            val
+                        } else {
+                            builder.build_int_s_extend(val, self.i64_type, "ret_ext").unwrap()
+                        };
+                        builder.build_return(Some(&ret_val)).ok();
+                    } else {
+                        builder.build_return(Some(&self.i64_type.const_int(0, false))).ok();
+                    }
+                },
+                Part::Decimal(size, value) => {
+                    match size {
+                        Size::S32 => float_values.push(self.f32_type.const_float(value)),
+                        Size::S64 => float_values.push(self.f64_type.const_float(value)),
+                        _ => {}
+                    }
+                },
+                Part::CalculateDecimal(_size, mode) => {
+                    let rhs = float_values.pop().unwrap();
+                    let lhs = float_values.pop().unwrap();
+                    match mode {
+                        DecimalCalculateType::Add => float_values.push(builder.build_float_add(lhs, rhs, "add_tmp").unwrap()),
+                        DecimalCalculateType::Sub => float_values.push(builder.build_float_sub(lhs, rhs, "sub_tmp").unwrap()),
+                        DecimalCalculateType::Mul => float_values.push(builder.build_float_mul(lhs, rhs, "mul_tmp").unwrap()),
+                        DecimalCalculateType::Div => float_values.push(builder.build_float_div(lhs, rhs, "div_tmp").unwrap()),
+                        DecimalCalculateType::Rem => float_values.push(builder.build_float_rem(lhs, rhs, "rem_tmp").unwrap()),
+                    }
+                },
+                Part::DecimalNegative => {
+                    let value = float_values.pop().unwrap();
+                    float_values.push(builder.build_float_neg(value, "neg_tmp").unwrap());
+                },
+                Part::ComparisonDecimal(mode, ordered) => {
+                    let rhs = float_values.pop().unwrap();
+                    let lhs = float_values.pop().unwrap();
+                    match mode {
+                        DecimalComparisonType::Equal => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OEQ } else { FloatPredicate::UEQ }, lhs, rhs, "eq_tmp").unwrap()),
+                        DecimalComparisonType::NotEqual => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::ONE } else { FloatPredicate::UNE }, lhs, rhs, "ne_tmp").unwrap()),
+                        DecimalComparisonType::Greater => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OGT } else { FloatPredicate::UGT }, lhs, rhs, "gt_tmp").unwrap()),
+                        DecimalComparisonType::GreaterEqual => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OGE } else { FloatPredicate::UGE }, lhs, rhs, "ge_tmp").unwrap()),
+                        DecimalComparisonType::Less => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OLT } else { FloatPredicate::ULT }, lhs, rhs, "lt_tmp").unwrap()),
+                        DecimalComparisonType::LessEqual => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OLE } else { FloatPredicate::ULE }, lhs, rhs, "le_tmp").unwrap()),
+                    }
+                },
+                Part::ResizeDecimal(extend) => {
+                    let value = float_values.pop().unwrap();
+                    if extend {
+                        float_values.push(builder.build_float_ext(value, self.f64_type, "tmp_ext").unwrap());
+                    } else {
+                        float_values.push(builder.build_float_trunc(value, self.f32_type, "tmp_trc").unwrap());
+                    }
+                },
+                Part::DecimalToInteger(unsigned, mode) => {
+                    let value = float_values.pop().unwrap();
+                    let int_type = match mode {
+                        Size::S8 => self.i8_type,
+                        Size::S16 => self.i16_type,
+                        Size::S32 => self.i32_type,
+                        Size::S64 => self.i64_type,
+                        Size::S128 => self.i128_type,
+                    };
+                    int_values.push(
+                        if unsigned { builder.build_float_to_unsigned_int(value, int_type, "tmp_i2f").unwrap() }
+                        else { builder.build_float_to_signed_int(value, int_type, "tmp_i2f").unwrap() }
+                    );
+                },
+                Part::BinaryOperation(mode) => {
+                    let rhs = int_values.pop().unwrap();
+                    let lhs = int_values.pop().unwrap();
+                    match mode {
+                        BinaryOperationType::LShift => int_values.push(builder.build_left_shift(lhs, rhs, "ls").unwrap()),
+                        BinaryOperationType::RShift(sg) => int_values.push(builder.build_right_shift(lhs, rhs, sg, "ls").unwrap()),
+                        BinaryOperationType::And => int_values.push(builder.build_and(lhs, rhs, "and_tmp").unwrap()),
+                        BinaryOperationType::Or => int_values.push(builder.build_or(lhs, rhs, "or_tmp").unwrap()),
+                        BinaryOperationType::Xor => int_values.push(builder.build_xor(lhs, rhs, "xor_tmp").unwrap()),
+                    }
+                },
+                Part::Bool(value) => {
+                    int_values.push(self.bool_type.const_int(if value {1} else {0}, false));
+                },
+                Part::Pop => {
+                    let _ = int_values.pop();
+                },
+                Part::Dup => {
+                    if let Some(top) = int_values.last().cloned() {
+                        int_values.push(top);
+                    }
+                },
+                Part::Swap => {
+                    let len = int_values.len();
+                    if len >= 2 {
+                        int_values.swap(len - 1, len - 2);
+                    }
+                },
+                Part::RotateThree => {
+                    let len = int_values.len();
+                    if len >= 3 {
+                        let c = int_values.pop().unwrap();
+                        let b = int_values.pop().unwrap();
+                        let a = int_values.pop().unwrap();
+                        int_values.push(b);
+                        int_values.push(c);
+                        int_values.push(a);
+                    }
+                },
+                Part::PushNull => {
+                    int_values.push(self.i64_type.const_int(0, false));
+                },
+                Part::Nop => {},
+                Part::Label(name) => {
+                    if let Some(target_bb) = label_blocks.get(&name) {
+                        if let Some(current_bb) = builder.get_insert_block() {
+                            if current_bb.get_terminator().is_none() {
+                                builder.build_unconditional_branch(*target_bb).ok();
+                            }
+                        }
+                        builder.position_at_end(*target_bb);
+                    }
+                },
+                Part::Jump(name) => {
+                    if let Some(target_bb) = label_blocks.get(&name) {
+                        builder.build_unconditional_branch(*target_bb).ok();
+                        let dead_bb = self.context.append_basic_block(function, "after_jump");
+                        builder.position_at_end(dead_bb);
+                    }
+                },
+                Part::JumpIfTrue(name) => {
+                    if let Some(val) = int_values.pop() {
+                        if let Some(target_bb) = label_blocks.get(&name) {
+                            let cond = if val.get_type() == self.bool_type {
+                                val
+                            } else {
+                                let zero = val.get_type().const_int(0, false);
+                                builder.build_int_compare(IntPredicate::NE, val, zero, "tobool").unwrap()
+                            };
+                            let fallthrough_bb = self.context.append_basic_block(function, "fallthrough");
+                            builder.build_conditional_branch(cond, *target_bb, fallthrough_bb).ok();
+                            builder.position_at_end(fallthrough_bb);
+                        }
+                    }
+                },
+                Part::JumpIfFalse(name) => {
+                    if let Some(val) = int_values.pop() {
+                        if let Some(target_bb) = label_blocks.get(&name) {
+                            let is_true = if val.get_type() == self.bool_type {
+                                val
+                            } else {
+                                let zero = val.get_type().const_int(0, false);
+                                builder.build_int_compare(IntPredicate::NE, val, zero, "to_bool").unwrap()
+                            };
+                            let fallthrough_bb = self.context.append_basic_block(function, "fallthrough");
+                            builder.build_conditional_branch(is_true, fallthrough_bb, *target_bb).ok();
+                            builder.position_at_end(fallthrough_bb);
+                        }
+                    }
+                },
+                Part::Halt => break,
+                Part::BitwiseNot(_) => {
+                    if let Some(val) = int_values.pop() {
+                        int_values.push(builder.build_not(val, "not_tmp").unwrap());
+                    }
+                },
+                Part::ReturnVoid => {
+                    if let Some(current_bb) = builder.get_insert_block() {
+                        if current_bb.get_terminator().is_none() {
+                            builder.build_return(Some(&self.i64_type.const_int(0, false))).ok();
+                        }
+                    }
+                },
+                Part::PushLocal(name) => {
+                    let alloca = locals_map.entry(name.clone()).or_insert_with(|| {
+                        builder.build_alloca(self.i64_type, &name).unwrap()
+                    });
+                    let loaded = builder.build_load(self.i64_type, *alloca, "loc_load").unwrap();
+                    int_values.push(loaded.into_int_value());
+                },
+                Part::StoreLocal(name) => {
+                    if let Some(val) = int_values.pop() {
+                        let alloca = locals_map.entry(name).or_insert_with(|| {
+                            builder.build_alloca(self.i64_type, "loc").unwrap()
+                        });
+                        let val_i64 = if val.get_type() == self.i64_type {
+                            val
+                        } else {
+                            builder.build_int_s_extend(val, self.i64_type, "loc_ext").unwrap()
+                        };
+                        builder.build_store(*alloca, val_i64).unwrap();
+                    }
+                },
+                Part::AllocStackStruct(_name) | Part::AllocStruct(_name) => {
+                    let alloca = builder.build_alloca(self.i64_type, "struct_alloc").unwrap();
+                    let ptr_int = builder.build_ptr_to_int(alloca, self.i64_type, "ptr_int").unwrap();
+                    int_values.push(ptr_int);
+                },
+                Part::GetStructField { offset, size, .. } => {
+                    let base = int_values.pop().unwrap_or_else(|| self.i64_type.const_int(0, false));
+                    let base_ptr = builder.build_int_to_ptr(base, self.context.ptr_type(AddressSpace::from(0)), "base_ptr").unwrap();
+                    let offset_val = self.i64_type.const_int(offset as u64, false);
+                    let field_ptr = unsafe { builder.build_gep(self.i8_type, base_ptr, &[offset_val], "gep").unwrap() };
+                    let ty = match size {
+                        Size::S8 => self.i8_type,
+                        Size::S16 => self.i16_type,
+                        Size::S32 => self.i32_type,
+                        _ => self.i64_type,
+                    };
+                    let loaded = builder.build_load(ty, field_ptr, "fld").unwrap();
+                    int_values.push(loaded.into_int_value());
+                },
+                Part::SetStructField { offset, .. } => {
+                    if let Some(val) = int_values.pop() {
+                        if let Some(base) = int_values.last().cloned() {
+                            let base_ptr = builder.build_int_to_ptr(base, self.context.ptr_type(AddressSpace::from(0)), "base_ptr").unwrap();
+                            let offset_val = self.i64_type.const_int(offset as u64, false);
+                            let field_ptr = unsafe { builder.build_gep(self.i8_type, base_ptr, &[offset_val], "gep").unwrap() };
+                            builder.build_store(field_ptr, val).unwrap();
+                        }
+                    }
+                },
+                Part::GetStructFieldPtr { offset, .. } => {
+                    if let Some(base) = int_values.pop() {
+                        let offset_val = self.i64_type.const_int(offset as u64, false);
+                        int_values.push(builder.build_int_add(base, offset_val, "ptr_add").unwrap());
+                    }
+                },
+                Part::UnaryMath(_size, math_type) => {
+                    match math_type {
+                        UnaryMathType::Abs => {
+                            if let Some(val) = int_values.pop() {
+                                let zero = val.get_type().const_int(0, false);
+                                let neg = builder.build_int_neg(val, "neg").unwrap();
+                                let is_neg = builder.build_int_compare(IntPredicate::SLT, val, zero, "is_neg").unwrap();
+                                let abs = builder.build_select(is_neg, neg, val, "abs").unwrap();
+                                int_values.push(abs.into_int_value());
+                            }
+                        },
+                        UnaryMathType::Negate => {
+                            if let Some(val) = int_values.pop() {
+                                int_values.push(builder.build_int_neg(val, "neg").unwrap());
+                            }
+                        },
+                        UnaryMathType::Increment => {
+                            if let Some(val) = int_values.pop() {
+                                let one = val.get_type().const_int(1, false);
+                                int_values.push(builder.build_int_add(val, one, "inc").unwrap());
+                            }
+                        },
+                        UnaryMathType::Decrement => {
+                            if let Some(val) = int_values.pop() {
+                                let one = val.get_type().const_int(1, false);
+                                int_values.push(builder.build_int_sub(val, one, "dec").unwrap());
+                            }
+                        },
+                        _ => {}
+                    }
+                },
+                Part::FusedMultiplyAdd(_) => {
+                    if float_values.len() >= 3 {
+                        let c = float_values.pop().unwrap();
+                        let b = float_values.pop().unwrap();
+                        let a = float_values.pop().unwrap();
+                        let mul = builder.build_float_mul(a, b, "fma_mul").unwrap();
+                        float_values.push(builder.build_float_add(mul, c, "fma_add").unwrap());
+                    }
+                },
+                _ => {}
+            }
+        }
+
+        if let Some(current_bb) = builder.get_insert_block() {
+            if current_bb.get_terminator().is_none() {
+                builder.build_return(Some(&self.i64_type.const_int(0, false))).ok();
+            }
+        }
+
+        Some(function)
+    }
+
     pub fn jit_compile<'a>(
         &self,
         paper: Paper,
@@ -726,8 +1178,8 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                             chunk.write(value as i64);
                         },
                         Size::S128 => {
-                            
-                            
+
+
                         }
                     }
                 },
@@ -791,8 +1243,8 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                     }
                 },
                 Part::ResizeInteger(_current_size, _to_size, _z_or_s) => {
-                    
-                    
+
+
                 },
                 Part::ReturnInteger => {
                     chunk.write(OpCode::ReturnFromFunction);
@@ -1044,7 +1496,7 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
             }
         }
 
-        
+
         for (patch_pos, target_name, is_backward) in jumps_to_patch {
             if is_backward {
                 let target_pos = labels.get(&target_name).copied().unwrap_or(0);

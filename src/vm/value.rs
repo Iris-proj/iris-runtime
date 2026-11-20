@@ -7,22 +7,22 @@ use crate::vm::function::Function;
 pub enum Value {
     Null,
     Bool(bool),
-    
+
     I8(i8),
     I16(i16),
     I32(i32),
     I64(i64),
     I128(i128),
-    
+
     U8(u8),
     U16(u16),
     U32(u32),
     U64(u64),
     U128(u128),
-    
+
     F32(f32),
     F64(f64),
-    
+
     Str(Rc<String>),
     Object(Rc<Instance>),
     Function(Rc<Function>),
@@ -86,7 +86,7 @@ impl Value {
             Value::Map(m) => !m.borrow().is_empty(),
             Value::Pointer(p) => *p != 0,
             Value::RawMemory(m) => !m.borrow().is_empty(),
-            _ => true, 
+            _ => true,
         }
     }
 }

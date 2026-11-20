@@ -3,7 +3,7 @@
 pub enum OpCode {
     Unknown = 0,
 
-    
+
     PushConstant8 = 1,
     PushConstant16 = 2,
     PushNull = 3,
@@ -21,7 +21,7 @@ pub enum OpCode {
     SwapTopTwoPairs = 15,
     SwapMultiple = 16,
 
-    
+
     LoadImmediateI8 = 17,
     LoadImmediateI16 = 18,
     LoadImmediateI32 = 19,
@@ -29,7 +29,7 @@ pub enum OpCode {
     LoadImmediateF32 = 21,
     LoadImmediateF64 = 22,
 
-    
+
     GetLocalVariable8 = 23,
     GetLocalVariable16 = 24,
     SetLocalVariable8 = 25,
@@ -38,7 +38,7 @@ pub enum OpCode {
     DefineGlobalVariable8 = 28,
     SetGlobalVariable8 = 29,
 
-    
+
     GetObjectProperty8 = 30,
     GetObjectProperty16 = 31,
     SetObjectProperty8 = 32,
@@ -61,7 +61,7 @@ pub enum OpCode {
     AllocateObject = 49,
     FreeObject = 50,
 
-    
+
     UnconditionalJump = 51,
     ShortJump = 52,
     JumpIfTrue = 53,
@@ -84,14 +84,14 @@ pub enum OpCode {
     EndTryBlock = 70,
     UnwindStack = 71,
 
-    
+
     LogicalNotOperation = 72,
     LogicalAndOperation = 73,
     LogicalOrOperation = 74,
     BooleanAndOperation = 75,
     BooleanOrOperation = 76,
 
-    
+
     BitwiseAndInt32 = 77,
     BitwiseAndInt64 = 78,
     BitwiseOrInt32 = 79,
@@ -109,7 +109,7 @@ pub enum OpCode {
     RotateLeftInt32 = 91,
     RotateRightInt32 = 92,
 
-    
+
     AddInt32 = 93,
     AddInt64 = 94,
     AddFloat32 = 95,
@@ -153,7 +153,7 @@ pub enum OpCode {
     SquareRootFloat32 = 133,
     SquareRootFloat64 = 134,
 
-    
+
     EqualInt32 = 135,
     EqualInt64 = 136,
     EqualFloat32 = 137,
@@ -183,7 +183,7 @@ pub enum OpCode {
     CompareAndBranchLessThanInt32 = 161,
     CompareAndBranchGreaterThanInt32 = 162,
 
-    
+
     GreaterUnsigned8 = 163,
     GreaterUnsigned16 = 164,
     GreaterUnsigned32 = 165,
@@ -213,7 +213,7 @@ pub enum OpCode {
     ConvertFloat64ToInt64 = 189,
     ConvertFloat64ToFloat32 = 190,
 
-    
+
     CreateNewArray8 = 191,
     CreateNewArray16 = 192,
     GetArrayLength = 193,
@@ -235,7 +235,7 @@ pub enum OpCode {
     SetObjectField16 = 209,
     SpawnDetached = 210,
 
-    
+
     AtomicAddInt32 = 211,
     AtomicSubtractInt32 = 212,
     AtomicCompareAndSwapInt32 = 213,
@@ -243,7 +243,7 @@ pub enum OpCode {
     ExitMonitor = 215,
     YieldCurrentThread = 216,
 
-    
+
     CallWithInlineCache = 217,
     CallWithInlineCacheInline = 218,
     GetPropertyWithInlineCache = 219,
@@ -252,14 +252,14 @@ pub enum OpCode {
     LoadMethodInlineCache = 222,
     MegamorphicMethodCall = 223,
 
-    
+
     PrintTopOfStack = 224,
     NoOperation = 225,
     Add = 226,
     Halt = 227,
     Print = 228,
 
-    
+
     AllocStackStruct = 229,
     AllocStruct = 230,
     GetStructField = 231,
@@ -272,13 +272,13 @@ pub enum OpCode {
     StorePtr = 238,
     OffsetPtr = 239,
 
-    
+
     KernelLaunch = 240,
     DeviceMemoryAlloc = 241,
     CopyToDevice = 242,
     CopyFromDevice = 243,
 
-    
+
     AddInt8 = 244,
     AddInt16 = 245,
     SubtractInt8 = 246,

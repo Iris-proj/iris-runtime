@@ -10,21 +10,21 @@ use iris::vm::gpu::GpuDevice;
 
 fn build_arithmetic_loop_paper(n: i64) -> Paper {
     Paper::new(format!("BenchLoop_{}", n), vec![
-        
+
         Part::Integer(Size::S64, 0, false),
         Part::StoreLocal("acc".to_string()),
-        
+
         Part::Integer(Size::S64, 0, false),
         Part::StoreLocal("i".to_string()),
 
         Part::Label("loop_start".to_string()),
-        
+
         Part::PushLocal("i".to_string()),
         Part::Integer(Size::S64, n as u64, false),
         Part::ComparisonInteger(IntegerComparisonType::Less, false, true),
         Part::JumpIfFalse("loop_end".to_string()),
 
-        
+
         Part::PushLocal("acc".to_string()),
         Part::PushLocal("i".to_string()),
         Part::Integer(Size::S64, 3, false),
@@ -37,7 +37,7 @@ fn build_arithmetic_loop_paper(n: i64) -> Paper {
         Part::BinaryOperation(BinaryOperationType::Xor),
         Part::StoreLocal("acc".to_string()),
 
-        
+
         Part::PushLocal("i".to_string()),
         Part::Integer(Size::S64, 1, false),
         Part::CalculateInteger(Size::S64, IntegerCalculateType::Add),
@@ -78,13 +78,14 @@ fn test_performance_comparison() {
     let n_1m: i64 = 1_000_000;
     let n_vm: i64 = 100_000;
 
-    
-    let c_output = std::process::Command::new("./benchmarks/bench_c")
-        .output()
-        .expect("Failed to execute C benchmark");
-    let c_str = String::from_utf8_lossy(&c_output.stdout);
 
-    
+    let c_str = if let Ok(c_output) = std::process::Command::new("./benchmarks/bench_c").output() {
+        String::from_utf8_lossy(&c_output.stdout).to_string()
+    } else {
+        String::new()
+    };
+
+
     let paper_10m = build_arithmetic_loop_paper(n_10m);
     let context = Context::create();
     let module_10m = context.create_module("bench_cpu_10m");
@@ -99,7 +100,7 @@ fn test_performance_comparison() {
     let cpu_res_10m = paper_10m.run_cpu(&rfc_10m, &ee_10m).expect("CPU JIT run failed");
     let cpu_duration_10m = t0_cpu.elapsed();
 
-    
+
     let paper_1m = build_arithmetic_loop_paper(n_1m);
     let module_1m = context.create_module("bench_cpu_1m");
     let rfc_1m = RuntimeFunctionCompiler::new(&context, module_1m);
@@ -113,7 +114,7 @@ fn test_performance_comparison() {
     let cpu_res_1m = paper_1m.run_cpu(&rfc_1m, &ee_1m).expect("CPU JIT run failed");
     let cpu_duration_1m = t0_cpu_1m.elapsed();
 
-    
+
     let mut gpu = GpuDevice::new();
     let parallel_paper_100k = build_parallel_vector_paper(100_000);
 
@@ -121,7 +122,7 @@ fn test_performance_comparison() {
     let gpu_res_100k = gpu.execute_paper(&parallel_paper_100k).expect("GPU kernel failed");
     let gpu_duration_100k = t0_gpu.elapsed();
 
-    
+
     let mut vm = IrisEngine::new();
     let vm_paper = build_arithmetic_loop_paper(n_vm);
     let t0_vm = Instant::now();

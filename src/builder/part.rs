@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum Part {
-    
+
     Print,
     Bool(bool),
     String(String),
@@ -18,33 +18,33 @@ pub enum Part {
     Nop,
     Halt,
 
-    
+
     Integer(Size, u64, bool),
     CalculateInteger(Size, IntegerCalculateType),
     ComparisonInteger(IntegerComparisonType, bool, bool),
     ResizeInteger(Size, Size, bool),
 
-    
+
     Decimal(Size, f64),
     CalculateDecimal(Size, DecimalCalculateType),
     DecimalNegative,
     ComparisonDecimal(DecimalComparisonType, bool),
     ResizeDecimal(bool),
 
-    
+
     UnaryMath(Size, UnaryMathType),
     FusedMultiplyAdd(Size),
 
-    
+
     IntegerToDecimal(bool, Size),
     DecimalToInteger(bool, Size),
     Bitcast(Size, Size),
 
-    
+
     BinaryOperation(BinaryOperationType),
     BitwiseNot(Size),
 
-    
+
     ReturnInteger,
     ReturnVoid,
     PushLocal(String),
@@ -64,46 +64,46 @@ pub enum Part {
     TailCall(String, Vec<Part>),
     Label(String),
 
-    
+
     DefineStruct {
         name: String,
         size: usize,
         align: usize,
         fields: Vec<StructField>,
     },
-    
+
     AllocStackStruct(String),
-    
+
     AllocStruct(String),
-    
+
     GetStructField {
         struct_name: String,
         field_index: usize,
         offset: usize,
         size: Size,
     },
-    
+
     SetStructField {
         struct_name: String,
         field_index: usize,
         offset: usize,
         size: Size,
     },
-    
+
     GetStructFieldPtr {
         struct_name: String,
         field_index: usize,
         offset: usize,
     },
-    
-    
+
+
     CallMethod {
         struct_name: String,
         method_name: String,
         args: Vec<Part>,
     },
 
-    
+
     AllocRaw {
         size: usize,
         align: usize,
@@ -120,7 +120,7 @@ pub enum Part {
         size: usize,
     },
 
-    
+
     CreateArray {
         element_type: Option<String>,
         size: usize,
@@ -139,17 +139,17 @@ pub enum Part {
     MapGetOrDefault,
     AllocateSlice,
 
-    
+
     AtomicAdd(Size),
     AtomicSub(Size),
     AtomicCas(Size),
     EnterMonitor,
     ExitMonitor,
     YieldThread,
-    
+
     SpawnDetached(String),
 
-    
+
     CallWithCache {
         method: String,
         args: Vec<Part>,
@@ -161,15 +161,15 @@ pub enum Part {
         args: Vec<Part>,
     },
 
-    
+
     Throw,
-    Try(String), 
+    Try(String),
     EndTry,
 
-    
+
     InvokeNative(String, Vec<Part>),
 
-    
+
     KernelLaunch {
         name: String,
         grid_dim: (u32, u32, u32),
