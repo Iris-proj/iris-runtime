@@ -149,7 +149,6 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                 _ => {}
             }
         }
-
         let mut label_blocks: std::collections::HashMap<String, inkwell::basic_block::BasicBlock<'ctx>> = std::collections::HashMap::new();
         for part in &paper.parts {
             if let Part::Label(name) = part {
@@ -162,6 +161,7 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
 
         let builder = self.context.create_builder();
         builder.position_at_end(basic_block);
+        let mut local_is_float: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
         let engine_ptr = function.get_first_param()?.into_pointer_value();
 
@@ -787,7 +787,6 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                 _ => {}
             }
         }
-
         let mut label_blocks: std::collections::HashMap<String, inkwell::basic_block::BasicBlock<'ctx>> = std::collections::HashMap::new();
         for part in &paper.parts {
             if let Part::Label(name) = part {
@@ -800,6 +799,7 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
 
         let builder = self.context.create_builder();
         builder.position_at_end(basic_block);
+        let mut local_is_float: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
         let ptr_type = self.context.ptr_type(AddressSpace::from(0));
         let puts_fn = self.module.get_function("puts")
@@ -810,7 +810,15 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
         for part in paper.parts.clone() {
             match part {
                 Part::Print => {
-                    if let Some(val) = int_values.pop() {
+                    if let Some(fval) = float_values.pop() {
+                        let fmt = builder.build_global_string_ptr("%.12f\n", "fmt_f64").unwrap();
+                        let fval_f64 = if fval.get_type() == self.f64_type {
+                            fval
+                        } else {
+                            builder.build_float_ext(fval, self.f64_type, "ext_f64").unwrap()
+                        };
+                        let _ = builder.build_call(printf_fn, &[fmt.as_pointer_value().into(), fval_f64.into()], "printf_call");
+                    } else if let Some(val) = int_values.pop() {
                         let fmt = builder.build_global_string_ptr("%ld\n", "fmt_i64").unwrap();
                         let val_i64 = if val.get_type() == self.i64_type {
                             val
@@ -834,8 +842,20 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                     }
                 },
                 Part::CalculateInteger(_size, mode) => {
-                    let rhs = int_values.pop().unwrap();
-                    let lhs = int_values.pop().unwrap();
+                    let rhs = if let Some(i) = int_values.pop() {
+                        i
+                    } else if let Some(f) = float_values.pop() {
+                        builder.build_float_to_signed_int(f, self.i64_type, "f2i_rhs").unwrap()
+                    } else {
+                        self.i64_type.const_int(0, false)
+                    };
+                    let lhs = if let Some(i) = int_values.pop() {
+                        i
+                    } else if let Some(f) = float_values.pop() {
+                        builder.build_float_to_signed_int(f, self.i64_type, "f2i_lhs").unwrap()
+                    } else {
+                        self.i64_type.const_int(0, false)
+                    };
                     match mode {
                         IntegerCalculateType::Add => int_values.push(builder.build_int_add(lhs, rhs, "add_tmp").unwrap()),
                         IntegerCalculateType::Sub => int_values.push(builder.build_int_sub(lhs, rhs, "sub_tmp").unwrap()),
@@ -932,8 +952,20 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                     }
                 },
                 Part::CalculateDecimal(_size, mode) => {
-                    let rhs = float_values.pop().unwrap();
-                    let lhs = float_values.pop().unwrap();
+                    let rhs = if let Some(f) = float_values.pop() {
+                        f
+                    } else if let Some(i) = int_values.pop() {
+                        builder.build_signed_int_to_float(i, self.f64_type, "i2f_rhs").unwrap()
+                    } else {
+                        unreachable!()
+                    };
+                    let lhs = if let Some(f) = float_values.pop() {
+                        f
+                    } else if let Some(i) = int_values.pop() {
+                        builder.build_signed_int_to_float(i, self.f64_type, "i2f_lhs").unwrap()
+                    } else {
+                        unreachable!()
+                    };
                     let res = match mode {
                         DecimalCalculateType::Add => builder.build_float_add(lhs, rhs, "add_tmp").unwrap(),
                         DecimalCalculateType::Sub => builder.build_float_sub(lhs, rhs, "sub_tmp").unwrap(),
@@ -1099,18 +1131,33 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                     let alloca = locals_map.entry(name.clone()).or_insert_with(|| {
                         builder.build_alloca(self.i64_type, &name).unwrap()
                     });
-                    let loaded = builder.build_load(self.i64_type, *alloca, "loc_load").unwrap();
-                    int_values.push(loaded.into_int_value());
+                    let loaded = builder.build_load(self.i64_type, *alloca, "loc_load").unwrap().into_int_value();
+                    if local_is_float.get(&name) == Some(&true) {
+                        let fval = builder.build_bit_cast(loaded, self.f64_type, "loc_load_f").unwrap().into_float_value();
+                        float_values.push(fval);
+                    } else {
+                        int_values.push(loaded);
+                    }
                 },
                 Part::StoreLocal(name) => {
-                    if let Some(val) = int_values.pop() {
-                        let alloca = locals_map.entry(name).or_insert_with(|| {
-                            builder.build_alloca(self.i64_type, "loc").unwrap()
-                        });
-                        let val_i64 = if val.get_type() == self.i64_type {
-                            val
+                    let alloca = locals_map.entry(name.clone()).or_insert_with(|| {
+                        builder.build_alloca(self.i64_type, "loc").unwrap()
+                    });
+                    if let Some(fval) = float_values.pop() {
+                        local_is_float.insert(name.clone(), true);
+                        let val_f64 = if fval.get_type() == self.f64_type {
+                            fval
                         } else {
-                            builder.build_int_s_extend(val, self.i64_type, "loc_ext").unwrap()
+                            builder.build_float_ext(fval, self.f64_type, "loc_ext_f").unwrap()
+                        };
+                        let bitcast = builder.build_bit_cast(val_f64, self.i64_type, "f_to_i").unwrap().into_int_value();
+                        builder.build_store(*alloca, bitcast).unwrap();
+                    } else if let Some(ival) = int_values.pop() {
+                        local_is_float.insert(name.clone(), false);
+                        let val_i64 = if ival.get_type() == self.i64_type {
+                            ival
+                        } else {
+                            builder.build_int_s_extend(ival, self.i64_type, "loc_ext").unwrap()
                         };
                         builder.build_store(*alloca, val_i64).unwrap();
                     }
