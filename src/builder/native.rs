@@ -391,6 +391,7 @@ impl<'ctx> NativeCompiler<'ctx> {
         builder.position_at_end(bb);
 
         let call_res = builder.build_call(entry_func, &[], "call_entry").unwrap();
+        call_res.set_call_convention(inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32);
         let ret_val = match call_res.try_as_basic_value() {
             inkwell::values::ValueKind::Basic(val) => {
                 let iv = val.into_int_value();
@@ -421,14 +422,45 @@ impl<'ctx> NativeCompiler<'ctx> {
         let cpu = if let Some(ref c) = config.cpu {
             c.clone()
         } else {
-            TargetMachine::get_host_cpu_name().to_string_lossy().to_string()
+            let host_cpu = TargetMachine::get_host_cpu_name().to_string_lossy().to_string();
+            if host_cpu.is_empty() || host_cpu == "generic" {
+                "native".to_string()
+            } else {
+                host_cpu
+            }
         };
 
-        let features = if let Some(ref f) = config.features {
+        let mut features = if let Some(ref f) = config.features {
             f.clone()
         } else {
             TargetMachine::get_host_cpu_features().to_string_lossy().to_string()
         };
+
+        #[cfg(target_arch = "x86_64")]
+        if config.features.is_none() {
+            let mut extra_features = Vec::new();
+            if is_x86_feature_detected!("avx2") && !features.contains("avx2") {
+                extra_features.push("+avx2");
+            }
+            if is_x86_feature_detected!("fma") && !features.contains("fma") {
+                extra_features.push("+fma");
+            }
+            if is_x86_feature_detected!("bmi1") && !features.contains("bmi") {
+                extra_features.push("+bmi");
+            }
+            if is_x86_feature_detected!("bmi2") && !features.contains("bmi2") {
+                extra_features.push("+bmi2");
+            }
+            if is_x86_feature_detected!("avx512f") && !features.contains("avx512f") {
+                extra_features.push("+avx512f");
+            }
+            if !extra_features.is_empty() {
+                if !features.is_empty() && !features.ends_with(',') {
+                    features.push(',');
+                }
+                features.push_str(&extra_features.join(","));
+            }
+        }
 
         target.create_target_machine(
             &triple,
@@ -443,6 +475,15 @@ impl<'ctx> NativeCompiler<'ctx> {
 
     pub fn emit_object_file(&self, output_path: &Path, config: &NativeBuildConfig) -> Result<(), String> {
         let tm = self.create_target_machine(config)?;
+        if config.pure_aot {
+            let options = inkwell::passes::PassBuilderOptions::create();
+            options.set_loop_vectorization(true);
+            options.set_loop_slp_vectorization(true);
+            options.set_loop_unrolling(true);
+            options.set_merge_functions(true);
+            options.set_verify_each(false);
+            let _ = self.rfc.module.run_passes("default<O3>", &tm, options);
+        }
         tm.write_to_file(&self.rfc.module, FileType::Object, output_path)
             .map_err(|e| format!("Failed to write object file: {:?}", e))
     }
@@ -450,6 +491,15 @@ impl<'ctx> NativeCompiler<'ctx> {
 
     pub fn emit_assembly(&self, output_path: &Path, config: &NativeBuildConfig) -> Result<(), String> {
         let tm = self.create_target_machine(config)?;
+        if config.pure_aot {
+            let options = inkwell::passes::PassBuilderOptions::create();
+            options.set_loop_vectorization(true);
+            options.set_loop_slp_vectorization(true);
+            options.set_loop_unrolling(true);
+            options.set_merge_functions(true);
+            options.set_verify_each(false);
+            let _ = self.rfc.module.run_passes("default<O3>", &tm, options);
+        }
         tm.write_to_file(&self.rfc.module, FileType::Assembly, output_path)
             .map_err(|e| format!("Failed to write assembly file: {:?}", e))
     }
@@ -479,6 +529,12 @@ impl<'ctx> NativeCompiler<'ctx> {
         cmd.arg(&obj_path);
         cmd.arg("-o");
         cmd.arg(output_path);
+
+        if config.pure_aot || config.opt_level == OptimizationLevel::Aggressive {
+            cmd.arg("-O3");
+            cmd.arg("-flto");
+            cmd.arg("-march=native");
+        }
 
         for arg in &config.linker_args {
             cmd.arg(arg);

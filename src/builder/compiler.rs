@@ -3,7 +3,7 @@ use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
 use inkwell::types::{FloatType, FunctionType, IntType, PointerType, VoidType};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
-use inkwell::values::{FloatValue, FunctionValue, IntValue};
+use inkwell::values::{BasicValue, FloatValue, FunctionValue, IntValue};
 use crate::builder::paper::Paper;
 use crate::builder::part::{BinaryOperationType, DecimalCalculateType, DecimalComparisonType, IntegerCalculateType, IntegerComparisonType, Part, Size, UnaryMathType};
 use crate::vm::chunk::{Chunk, ChunkWriter};
@@ -140,9 +140,11 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
         for part in &paper.parts {
             match part {
                 Part::PushLocal(name) | Part::StoreLocal(name) => {
-                    locals_map.entry(name.clone()).or_insert_with(|| {
-                        entry_builder.build_alloca(self.i64_type, name).unwrap()
-                    });
+                    if name != "global_id" && name != "thread_idx" && name != "block_idx" {
+                        locals_map.entry(name.clone()).or_insert_with(|| {
+                            entry_builder.build_alloca(self.i64_type, name).unwrap()
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -670,8 +672,23 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                         let c = float_values.pop().unwrap();
                         let b = float_values.pop().unwrap();
                         let a = float_values.pop().unwrap();
-                        let mul = builder.build_float_mul(a, b, "fma_mul").unwrap();
-                        float_values.push(builder.build_float_add(mul, c, "fma_add").unwrap());
+                        let is_f64 = a.get_type() == self.f64_type;
+                        let intrinsic_name = if is_f64 { "llvm.fma.f64" } else { "llvm.fma.f32" };
+                        let f_type = if is_f64 { self.f64_type } else { self.f32_type };
+                        let fma_fn = self.module.get_function(intrinsic_name)
+                            .unwrap_or_else(|| self.module.add_function(
+                                intrinsic_name,
+                                f_type.fn_type(&[f_type.into(), f_type.into(), f_type.into()], false),
+                                None,
+                            ));
+                        let res = builder.build_call(fma_fn, &[a.into(), b.into(), c.into()], "fma").unwrap();
+                        if let inkwell::values::ValueKind::Basic(val) = res.try_as_basic_value() {
+                            let fv = val.into_float_value();
+                            if let Some(inst) = fv.as_instruction() {
+                                let _ = inst.set_fast_math_flags(inkwell::values::FastMathFlags::all());
+                            }
+                            float_values.push(fv);
+                        }
                     }
                 }
                 _ => {}
@@ -706,7 +723,54 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
         } else {
             self.module.add_function(paper.name.as_str(), pure_fn_type, None)
         };
+
+        let nounwind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("nounwind");
+        if nounwind_id != 0 {
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_enum_attribute(nounwind_id, 0),
+            );
+        }
+        let willreturn_id = inkwell::attributes::Attribute::get_named_enum_kind_id("willreturn");
+        if willreturn_id != 0 {
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_enum_attribute(willreturn_id, 0),
+            );
+        }
+        let nofree_id = inkwell::attributes::Attribute::get_named_enum_kind_id("nofree");
+        if nofree_id != 0 {
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_enum_attribute(nofree_id, 0),
+            );
+        }
+        function.set_call_conventions(inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32);
+
+        for i in 0..function.count_params() {
+            let param = function.get_nth_param(i).unwrap();
+            if param.is_pointer_value() {
+                let noalias_id = inkwell::attributes::Attribute::get_named_enum_kind_id("noalias");
+                if noalias_id != 0 {
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Param(i),
+                        self.context.create_enum_attribute(noalias_id, 0),
+                    );
+                }
+            }
+        }
+
         let basic_block = self.context.append_basic_block(function, "entry");
+
+        let alias_domain = self.context.metadata_node(&[
+            self.context.metadata_string("iris_domain").into(),
+        ]);
+        let alias_scope = self.context.metadata_node(&[
+            self.context.metadata_string("iris_struct_scope").into(),
+            alias_domain.into(),
+        ]);
+        let alias_scope_list = self.context.metadata_node(&[alias_scope.into()]);
+        let alias_scope_kind = self.context.get_kind_id("alias.scope");
 
 
         let entry_builder = self.context.create_builder();
@@ -714,9 +778,11 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
         for part in &paper.parts {
             match part {
                 Part::PushLocal(name) | Part::StoreLocal(name) => {
-                    locals_map.entry(name.clone()).or_insert_with(|| {
-                        entry_builder.build_alloca(self.i64_type, name).unwrap()
-                    });
+                    if name != "global_id" && name != "thread_idx" && name != "block_idx" {
+                        locals_map.entry(name.clone()).or_insert_with(|| {
+                            entry_builder.build_alloca(self.i64_type, name).unwrap()
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -868,29 +934,41 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                 Part::CalculateDecimal(_size, mode) => {
                     let rhs = float_values.pop().unwrap();
                     let lhs = float_values.pop().unwrap();
-                    match mode {
-                        DecimalCalculateType::Add => float_values.push(builder.build_float_add(lhs, rhs, "add_tmp").unwrap()),
-                        DecimalCalculateType::Sub => float_values.push(builder.build_float_sub(lhs, rhs, "sub_tmp").unwrap()),
-                        DecimalCalculateType::Mul => float_values.push(builder.build_float_mul(lhs, rhs, "mul_tmp").unwrap()),
-                        DecimalCalculateType::Div => float_values.push(builder.build_float_div(lhs, rhs, "div_tmp").unwrap()),
-                        DecimalCalculateType::Rem => float_values.push(builder.build_float_rem(lhs, rhs, "rem_tmp").unwrap()),
+                    let res = match mode {
+                        DecimalCalculateType::Add => builder.build_float_add(lhs, rhs, "add_tmp").unwrap(),
+                        DecimalCalculateType::Sub => builder.build_float_sub(lhs, rhs, "sub_tmp").unwrap(),
+                        DecimalCalculateType::Mul => builder.build_float_mul(lhs, rhs, "mul_tmp").unwrap(),
+                        DecimalCalculateType::Div => builder.build_float_div(lhs, rhs, "div_tmp").unwrap(),
+                        DecimalCalculateType::Rem => builder.build_float_rem(lhs, rhs, "rem_tmp").unwrap(),
+                    };
+                    if let Some(inst) = res.as_instruction() {
+                        let _ = inst.set_fast_math_flags(inkwell::values::FastMathFlags::all());
                     }
+                    float_values.push(res);
                 },
                 Part::DecimalNegative => {
                     let value = float_values.pop().unwrap();
-                    float_values.push(builder.build_float_neg(value, "neg_tmp").unwrap());
+                    let res = builder.build_float_neg(value, "neg_tmp").unwrap();
+                    if let Some(inst) = res.as_instruction() {
+                        let _ = inst.set_fast_math_flags(inkwell::values::FastMathFlags::all());
+                    }
+                    float_values.push(res);
                 },
                 Part::ComparisonDecimal(mode, ordered) => {
                     let rhs = float_values.pop().unwrap();
                     let lhs = float_values.pop().unwrap();
-                    match mode {
-                        DecimalComparisonType::Equal => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OEQ } else { FloatPredicate::UEQ }, lhs, rhs, "eq_tmp").unwrap()),
-                        DecimalComparisonType::NotEqual => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::ONE } else { FloatPredicate::UNE }, lhs, rhs, "ne_tmp").unwrap()),
-                        DecimalComparisonType::Greater => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OGT } else { FloatPredicate::UGT }, lhs, rhs, "gt_tmp").unwrap()),
-                        DecimalComparisonType::GreaterEqual => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OGE } else { FloatPredicate::UGE }, lhs, rhs, "ge_tmp").unwrap()),
-                        DecimalComparisonType::Less => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OLT } else { FloatPredicate::ULT }, lhs, rhs, "lt_tmp").unwrap()),
-                        DecimalComparisonType::LessEqual => int_values.push(builder.build_float_compare(if ordered { FloatPredicate::OLE } else { FloatPredicate::ULE }, lhs, rhs, "le_tmp").unwrap()),
+                    let res = match mode {
+                        DecimalComparisonType::Equal => builder.build_float_compare(if ordered { FloatPredicate::OEQ } else { FloatPredicate::UEQ }, lhs, rhs, "eq_tmp").unwrap(),
+                        DecimalComparisonType::NotEqual => builder.build_float_compare(if ordered { FloatPredicate::ONE } else { FloatPredicate::UNE }, lhs, rhs, "ne_tmp").unwrap(),
+                        DecimalComparisonType::Greater => builder.build_float_compare(if ordered { FloatPredicate::OGT } else { FloatPredicate::UGT }, lhs, rhs, "gt_tmp").unwrap(),
+                        DecimalComparisonType::GreaterEqual => builder.build_float_compare(if ordered { FloatPredicate::OGE } else { FloatPredicate::UGE }, lhs, rhs, "ge_tmp").unwrap(),
+                        DecimalComparisonType::Less => builder.build_float_compare(if ordered { FloatPredicate::OLT } else { FloatPredicate::ULT }, lhs, rhs, "lt_tmp").unwrap(),
+                        DecimalComparisonType::LessEqual => builder.build_float_compare(if ordered { FloatPredicate::OLE } else { FloatPredicate::ULE }, lhs, rhs, "le_tmp").unwrap(),
+                    };
+                    if let Some(inst) = res.as_instruction() {
+                        let _ = inst.set_fast_math_flags(inkwell::values::FastMathFlags::all());
                     }
+                    int_values.push(res);
                 },
                 Part::ResizeDecimal(extend) => {
                     let value = float_values.pop().unwrap();
@@ -1054,6 +1132,9 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                         _ => self.i64_type,
                     };
                     let loaded = builder.build_load(ty, field_ptr, "fld").unwrap();
+                    if let Some(inst) = loaded.as_instruction_value() {
+                        let _ = inst.set_metadata(alias_scope_list, alias_scope_kind);
+                    }
                     int_values.push(loaded.into_int_value());
                 },
                 Part::SetStructField { offset, .. } => {
@@ -1062,7 +1143,9 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                             let base_ptr = builder.build_int_to_ptr(base, self.context.ptr_type(AddressSpace::from(0)), "base_ptr").unwrap();
                             let offset_val = self.i64_type.const_int(offset as u64, false);
                             let field_ptr = unsafe { builder.build_gep(self.i8_type, base_ptr, &[offset_val], "gep").unwrap() };
-                            builder.build_store(field_ptr, val).unwrap();
+                            if let Ok(store_inst) = builder.build_store(field_ptr, val) {
+                                let _ = store_inst.set_metadata(alias_scope_list, alias_scope_kind);
+                            }
                         }
                     }
                 },
@@ -1108,8 +1191,23 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
                         let c = float_values.pop().unwrap();
                         let b = float_values.pop().unwrap();
                         let a = float_values.pop().unwrap();
-                        let mul = builder.build_float_mul(a, b, "fma_mul").unwrap();
-                        float_values.push(builder.build_float_add(mul, c, "fma_add").unwrap());
+                        let is_f64 = a.get_type() == self.f64_type;
+                        let intrinsic_name = if is_f64 { "llvm.fma.f64" } else { "llvm.fma.f32" };
+                        let f_type = if is_f64 { self.f64_type } else { self.f32_type };
+                        let fma_fn = self.module.get_function(intrinsic_name)
+                            .unwrap_or_else(|| self.module.add_function(
+                                intrinsic_name,
+                                f_type.fn_type(&[f_type.into(), f_type.into(), f_type.into()], false),
+                                None,
+                            ));
+                        let res = builder.build_call(fma_fn, &[a.into(), b.into(), c.into()], "fma").unwrap();
+                        if let inkwell::values::ValueKind::Basic(val) = res.try_as_basic_value() {
+                            let fv = val.into_float_value();
+                            if let Some(inst) = fv.as_instruction() {
+                                let _ = inst.set_fast_math_flags(inkwell::values::FastMathFlags::all());
+                            }
+                            float_values.push(fv);
+                        }
                     }
                 },
                 _ => {}
@@ -1122,7 +1220,63 @@ impl<'ctx> RuntimeFunctionCompiler<'ctx> {
             }
         }
 
+        self.optimize_pure_function(function);
+
         Some(function)
+    }
+
+    pub fn optimize_pure_function(&self, _function: FunctionValue<'ctx>) {
+        inkwell::targets::Target::initialize_all(&inkwell::targets::InitializationConfig::default());
+        let triple = inkwell::targets::TargetMachine::get_default_triple();
+        if let Ok(target) = inkwell::targets::Target::from_triple(&triple) {
+            let host_cpu = inkwell::targets::TargetMachine::get_host_cpu_name().to_string_lossy().to_string();
+            let cpu = if host_cpu.is_empty() || host_cpu == "generic" {
+                "native".to_string()
+            } else {
+                host_cpu
+            };
+            let mut features = inkwell::targets::TargetMachine::get_host_cpu_features().to_string_lossy().to_string();
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut extra_features = Vec::new();
+                if is_x86_feature_detected!("avx2") && !features.contains("avx2") {
+                    extra_features.push("+avx2");
+                }
+                if is_x86_feature_detected!("fma") && !features.contains("fma") {
+                    extra_features.push("+fma");
+                }
+                if is_x86_feature_detected!("bmi1") && !features.contains("bmi") {
+                    extra_features.push("+bmi");
+                }
+                if is_x86_feature_detected!("bmi2") && !features.contains("bmi2") {
+                    extra_features.push("+bmi2");
+                }
+                if is_x86_feature_detected!("avx512f") && !features.contains("avx512f") {
+                    extra_features.push("+avx512f");
+                }
+                if !extra_features.is_empty() {
+                    if !features.is_empty() && !features.ends_with(',') {
+                        features.push(',');
+                    }
+                    features.push_str(&extra_features.join(","));
+                }
+            }
+            if let Some(tm) = target.create_target_machine(
+                &triple,
+                &cpu,
+                &features,
+                inkwell::OptimizationLevel::Aggressive,
+                inkwell::targets::RelocMode::PIC,
+                inkwell::targets::CodeModel::Default,
+            ) {
+                let options = inkwell::passes::PassBuilderOptions::create();
+                options.set_loop_vectorization(true);
+                options.set_loop_slp_vectorization(true);
+                options.set_loop_unrolling(true);
+                options.set_verify_each(false);
+                let _ = self.module.run_passes("default<O3>", &tm, options);
+            }
+        }
     }
 
     pub fn jit_compile<'a>(

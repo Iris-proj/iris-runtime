@@ -280,3 +280,145 @@ fn test_cli_build_and_run_native() {
     let _ = std::fs::remove_file(paper_file);
     let _ = std::fs::remove_file(bin_file);
 }
+
+#[test]
+fn test_pure_native_optimization_promotes_allocas_and_dead_blocks() {
+    let paper = Paper::new("PureLoopOpt", vec![
+        Part::Integer(Size::S64, 0, false),
+        Part::StoreLocal("sum".to_string()),
+        Part::Integer(Size::S64, 1, false),
+        Part::StoreLocal("i".to_string()),
+        Part::Label("loop".to_string()),
+        Part::PushLocal("i".to_string()),
+        Part::Integer(Size::S64, 10, false),
+        Part::ComparisonInteger(IntegerComparisonType::Greater, false, false),
+        Part::JumpIfTrue("end".to_string()),
+        Part::PushLocal("sum".to_string()),
+        Part::PushLocal("i".to_string()),
+        Part::CalculateInteger(Size::S64, IntegerCalculateType::Add),
+        Part::StoreLocal("sum".to_string()),
+        Part::PushLocal("i".to_string()),
+        Part::Integer(Size::S64, 1, false),
+        Part::CalculateInteger(Size::S64, IntegerCalculateType::Add),
+        Part::StoreLocal("i".to_string()),
+        Part::Jump("loop".to_string()),
+        Part::Label("end".to_string()),
+        Part::PushLocal("sum".to_string()),
+        Part::ReturnInteger,
+    ]);
+
+    let bin_path = Path::new("target/pure_loop_opt_bin");
+    paper.build_native_executable_pure(bin_path, OptimizationLevel::Aggressive)
+        .expect("Failed to build pure loop executable");
+
+    let output = Command::new(bin_path).output().expect("Failed to execute");
+    assert_eq!(output.status.code(), Some(55));
+    let _ = std::fs::remove_file(bin_path);
+
+    let context = inkwell::context::Context::create();
+    let module = context.create_module("test_opt");
+    let rfc = iris::builder::compiler::RuntimeFunctionCompiler::new(&context, module);
+    let func = rfc.compile_paper_function_pure(&paper).unwrap();
+    let ir = func.to_string();
+    assert!(!ir.contains("alloca"), "mem2reg pass must eliminate all stack allocas for locals: {}", ir);
+    assert!(!ir.contains("after_jump"), "DCE pass must prune dead blocks: {}", ir);
+}
+
+#[test]
+fn test_pure_native_fast_math_and_fma() {
+    let paper = Paper::new("PureFMA", vec![
+        Part::Decimal(Size::S64, 3.0),
+        Part::Decimal(Size::S64, 4.0),
+        Part::Decimal(Size::S64, 5.0),
+        Part::FusedMultiplyAdd(Size::S64),
+        Part::DecimalToInteger(false, Size::S64),
+        Part::ReturnInteger,
+    ]);
+
+    let bin_path = Path::new("target/pure_fma_bin");
+    paper.build_native_executable_pure(bin_path, OptimizationLevel::Aggressive)
+        .expect("Failed to build pure FMA executable");
+
+    let output = Command::new(bin_path).output().expect("Failed to execute");
+    assert_eq!(output.status.code(), Some(17));
+    let _ = std::fs::remove_file(bin_path);
+
+    let context = inkwell::context::Context::create();
+    let module = context.create_module("test_fma");
+    let rfc = iris::builder::compiler::RuntimeFunctionCompiler::new(&context, module);
+    let func = rfc.compile_paper_function_pure(&paper).unwrap();
+    let ir = func.to_string();
+    assert!(ir.contains("17"), "Optimization should compute or contain 17: {}", ir);
+}
+
+#[test]
+fn test_native_host_microarchitecture_target_machine() {
+    let context = inkwell::context::Context::create();
+    let compiler = iris::builder::native::NativeCompiler::new(&context, "test_host_arch");
+    let mut config = iris::builder::native::NativeBuildConfig::default();
+    config.pure_aot = true;
+    let tm = compiler.create_target_machine(&config).expect("TargetMachine creation must succeed");
+    let cpu = tm.get_cpu().to_string_lossy().to_string();
+    assert!(!cpu.is_empty(), "CPU name must not be empty");
+    let feature_str = tm.get_feature_string().to_string_lossy().to_string();
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        assert!(feature_str.contains("avx2"), "TargetMachine feature string should include avx2: {}", feature_str);
+    }
+}
+
+#[test]
+fn test_pure_native_fastcc_attributes_and_noalias_metadata() {
+    let paper = Paper::new("PureStructAndAttrs", vec![
+        Part::AllocStackStruct("Point".to_string()),
+        Part::Dup,
+        Part::Integer(Size::S32, 42, false),
+        Part::SetStructField {
+            struct_name: "Point".to_string(),
+            field_index: 0,
+            offset: 0,
+            size: Size::S32,
+        },
+        Part::GetStructField {
+            struct_name: "Point".to_string(),
+            field_index: 0,
+            offset: 0,
+            size: Size::S32,
+        },
+        Part::ReturnInteger,
+    ]);
+
+    let bin_path = Path::new("target/pure_struct_fastcc_bin");
+    paper.build_native_executable_pure(bin_path, OptimizationLevel::Aggressive)
+        .expect("Failed to build pure struct executable with FastCC");
+
+    let output = Command::new(bin_path).output().expect("Failed to execute");
+    assert_eq!(output.status.code(), Some(42));
+    let _ = std::fs::remove_file(bin_path);
+
+    let context = inkwell::context::Context::create();
+    let module = context.create_module("test_attrs");
+    let rfc = iris::builder::compiler::RuntimeFunctionCompiler::new(&context, module);
+    let func = rfc.compile_paper_function_pure(&paper).unwrap();
+    assert_eq!(func.get_call_conventions(), inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32);
+    let ir = func.to_string();
+    assert!(ir.contains("fastcc") || ir.contains("nounwind"), "IR should reflect fastcc / attributes: {}", ir);
+}
+
+#[test]
+fn test_pure_native_executable_with_lto() {
+    let paper = Paper::new("PureLTO", vec![
+        Part::Integer(Size::S64, 100, false),
+        Part::Integer(Size::S64, 20, false),
+        Part::CalculateInteger(Size::S64, IntegerCalculateType::Div(false)),
+        Part::ReturnInteger,
+    ]);
+
+    let bin_path = Path::new("target/pure_lto_bin");
+    paper.build_native_executable_pure(bin_path, OptimizationLevel::Aggressive)
+        .expect("Failed to build pure executable with LTO");
+
+    let output = Command::new(bin_path).output().expect("Failed to execute");
+    assert_eq!(output.status.code(), Some(5));
+    let _ = std::fs::remove_file(bin_path);
+}

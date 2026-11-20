@@ -137,7 +137,6 @@ use iris::builder::part::{Part, Size, IntegerCalculateType};
 use iris::vm::engine::IrisEngine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Build an execution pipeline using Paper and Parts
     let paper = Paper::new("SimpleAdd", vec![
         Part::Integer(Size::S32, 25, false),
         Part::Integer(Size::S32, 17, false),
@@ -145,12 +144,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Part::ReturnInteger,
     ]);
 
-    // 2. Execute on the VM
     let mut vm = IrisEngine::new();
     let vm_res = paper.run_vm(&mut vm)?;
     println!("Result from VM: {:?}", vm_res);
 
-    // 3. Or build directly into a native executable
     paper.build_native_executable("target/simple_add", inkwell::OptimizationLevel::Aggressive)?;
 
     Ok(())
