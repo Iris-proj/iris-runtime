@@ -126,6 +126,7 @@ iris build app.paper --target-triple x86_64-unknown-linux-gnu --cpu skylake -O 3
 ```
 
 ---
+And! Build best of Iris using `--pure`.
 
 ## Rust API Usage
 
