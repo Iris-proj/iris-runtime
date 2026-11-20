@@ -109,6 +109,7 @@ iris run bytecode.ic
 ### Compiling Ahead-of-Time (AOT)
 
 Generate standalone executables, object files, or LLVM IR using `iris build`:
+And! Build best of Iris using `--pure`.
 
 ```py
 # Build standalone binary executable
@@ -124,7 +125,6 @@ iris build app.paper --emit ll  -o my_app.ll
 # Cross-compilation target specification
 iris build app.paper --target-triple x86_64-unknown-linux-gnu --cpu skylake -O 3
 ```
-And! Build best of Iris using `--pure`.
 
 ---
 
